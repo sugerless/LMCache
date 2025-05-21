@@ -70,6 +70,7 @@ class LMCacheEngine:
         memory_allocator: MemoryAllocatorInterface,
         token_database: TokenDatabase,
         gpu_connector: GPUConnectorInterface,
+        layerwise: bool = False,
     ):
         logger.info(f"Creating LMCacheEngine with config: {config}")
         self.config = config
@@ -101,7 +102,7 @@ class LMCacheEngine:
         else:
             self.storage_manager = StorageManager(
                 config, metadata, self.memory_allocator, self.lmcache_worker,
-                self.lookup_server)  # type: ignore[assignment]
+                self.lookup_server, layerwise)  # type: ignore[assignment]
 
         if self.enable_p2p:
             self.distributed_loop = asyncio.get_event_loop()
@@ -130,10 +131,10 @@ class LMCacheEngine:
         """
         st = time.perf_counter()
         if mask is not None:
-            monitor_req_id = self.stats_monitor.on_store_request(
-                torch.sum(mask))
+            num_store_tokens = torch.sum(mask)
         else:
-            monitor_req_id = self.stats_monitor.on_store_request(len(tokens))
+            num_store_tokens = len(tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(num_store_tokens)
 
         # Register the put request
         keys = []
@@ -188,11 +189,9 @@ class LMCacheEngine:
         put_time += time.perf_counter() - t
         ed = time.perf_counter()
 
-        assert mask is not None
-
         logger.info(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms", torch.sum(mask),
+            "offload_time: %.4f ms, put_time: %.4f ms", num_store_tokens,
             (ed - st) * 1000, tot_kv_size / (ed - st) / 1024**3,
             offload_time * 1000, put_time * 1000)
 
@@ -329,7 +328,7 @@ class LMCacheEngine:
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
                                                 retrieved_tokens)
-        logger.debug(f"Retrieved {retrieved_tokens} "
+        logger.info(f"[blankdebug]Retrieved {retrieved_tokens} "
                      f"out of {num_required_tokens} "
                      f"out of total {len(tokens)} tokens")
         return ret_mask
@@ -447,9 +446,10 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         memory_allocator: MemoryAllocatorInterface,
         token_database: TokenDatabase,
         layerwise_gpu_connector: GPUConnectorInterface,
+        layerwise: bool = True,
     ):
         super().__init__(config, metadata, memory_allocator, token_database,
-                         layerwise_gpu_connector)
+                         layerwise_gpu_connector, layerwise)
         assert isinstance(self.gpu_connector,
                           VLLMPagedMemLayerwiseGPUConnector)
 
@@ -638,6 +638,7 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                 starts, ends, **kwargs)
             next(mem_obj_consumer)
 
+            to_count_down = []
             for layer_id in range(self.num_layers):
 
                 tasks = next(get_generator)
@@ -648,10 +649,14 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
                 mem_objs_layer = [task.result() for task in tasks]
                 mem_obj_consumer.send(mem_objs_layer)
+                to_count_down.extend(mem_objs_layer)
 
             # TODO(Jiayi): Need to be done in a modular way
             for keys_layer in keys_layer_major:
                 self.storage_manager.batched_unpin(keys_layer)
+
+            for mem_obj in to_count_down:
+                mem_obj.ref_count_down()
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`

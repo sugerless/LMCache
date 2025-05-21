@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -144,6 +145,7 @@ class LMCStatsMonitor:
         self.interval_retrieve_requests += 1
         self.retrieve_requests[self.retrieve_request_id] = retrieve_stats
         self.retrieve_request_id += 1
+        logger.info(f'[blankdebug] interval_requested_tokens: {self.interval_requested_tokens}')
         return self.retrieve_request_id - 1
 
     @thread_safe
@@ -154,6 +156,8 @@ class LMCStatsMonitor:
         retrieve_stats.local_hit_tokens = retrieved_tokens
         retrieve_stats.end_time = curr_time
         self.interval_hit_tokens += retrieved_tokens
+        logger.info(f'[blankdebug] interval_hit_tokens: {self.interval_hit_tokens}')
+
 
     @thread_safe
     def on_store_request(self, num_tokens: int) -> int:
@@ -318,6 +322,13 @@ class PrometheusLogger:
     _histogram_cls = prometheus_client.Histogram
 
     def __init__(self, metadata: LMCacheEngineMetadata):
+        # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
+        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+            default_dir = "/tmp/lmcache_prometheus"
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
+            if not os.path.exists(default_dir):
+                os.makedirs(default_dir, exist_ok=True)
+
         self.metadata = metadata
 
         self.labels = self._metadata_to_labels(metadata)
@@ -572,6 +583,13 @@ class PrometheusLogger:
 class LMCacheStatsLogger:
 
     def __init__(self, metadata: LMCacheEngineMetadata, log_interval: int):
+         # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
+        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+            default_dir = "/tmp/lmcache_prometheus"
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
+            if not os.path.exists(default_dir):
+                os.makedirs(default_dir, exist_ok=True)
+
         self.metadata = metadata
         self.log_interval = log_interval
         self.monitor = LMCStatsMonitor.GetOrCreate()

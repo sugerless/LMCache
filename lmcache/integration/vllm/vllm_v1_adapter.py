@@ -167,11 +167,30 @@ class RequestTracker:
                 local cache hit) and new tokens that will be scheduled.
 
         """
+        # vLLM 0.9.0 update: request.block_ids changed from list[int] to
+        # list[list[int]]
+        # Need to check the type of request.block_ids
+
+        unfolded_block_ids = []
+
+        if not isinstance(new_request.block_ids[0], list):
+            unfolded_block_ids = new_request.block_ids.copy()
+        else:
+            # According to the vLLM code
+            # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
+            # sched/scheduler.py#L943),
+            # only one KVCacheGroup is supported in connector for now.
+
+            # TODO: Please support multiple KVCacheGroup in connector.
+            # NOTE: Also, `update` method in RequestTracker should be
+            # updated accordingly.
+            unfolded_block_ids = new_request.block_ids[0].copy()
+
         return RequestTracker(
             req_id=new_request.req_id,
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].
             copy(),
-            allocated_block_ids=new_request.block_ids.copy(),
+            allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=0,
         )
 
@@ -183,7 +202,12 @@ class RequestTracker:
         scheduled again
         """
         self.token_ids.extend(cached_request.new_token_ids)
-        self.allocated_block_ids.extend(cached_request.new_block_ids)
+        new_block_ids: list[int]
+        if not isinstance(cached_request.new_block_ids[0], list):
+            new_block_ids = cached_request.new_block_ids
+        else:
+            new_block_ids = cached_request.new_block_ids[0]
+        self.allocated_block_ids.extend(new_block_ids)
 
 
 @dataclass
@@ -229,8 +253,9 @@ class ReqMeta:
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
         skip_leading_tokens = tracker.num_saved_tokens
-        chunk_boundary = cdiv(tracker.num_saved_tokens, lmcache_chunk_size) * \
-                lmcache_chunk_size
+        chunk_boundary = (
+            cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) *
+            lmcache_chunk_size)
         skip_save = skip_save or (tracker.num_saved_tokens > 0 and \
                 input_token_len < chunk_boundary)
 
@@ -314,7 +339,7 @@ class LMCacheConnectorV1Impl:
         else:
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config, vllm_config.parallel_config,
-                vllm_config.cache_config)
+                vllm_config.cache_config, vllm_config.scheduler_config)
             self.use_layerwise = isinstance(self.lmcache_engine,
                                             LayerwiseLMCacheEngine)
 
@@ -406,8 +431,9 @@ class LMCacheConnectorV1Impl:
         for request in metadata.requests:
             if request.load_spec is None:
                 continue
-
             tokens = request.token_ids
+            logger.info(f"[blankdebug]: request token len: {len(tokens)}")
+
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = request.slot_mapping.cuda()
             assert len(tokens) == len(slot_mapping)
@@ -465,8 +491,8 @@ class LMCacheConnectorV1Impl:
             layer_name: the name of that layer
         """
         if self.layerwise_retrievers:
-            logger.debug(
-                f"Waiting for layer {self.current_layer} to be loaded")
+            logger.info(
+                f"[blankdebug] Waiting for layer {self.current_layer} to be loaded")
 
         # Wait for the layer to be loaded
         for layerwise_retriever in self.layerwise_retrievers:
@@ -542,9 +568,10 @@ class LMCacheConnectorV1Impl:
                 store_mask[:skip_leading_tokens] = False
 
                 logger.info(
-                    "Storing KV cache for %d out of %d tokens for request %s",
+                    "Storing KV cache for %d out of %d tokens "
+                    "(skip_leading_tokens=%d) for request %s",
                     len(token_ids) - skip_leading_tokens, len(token_ids),
-                    request.req_id)
+                    skip_leading_tokens, request.req_id)
                 layerwise_storer = self.lmcache_engine.store_layer(
                     token_ids,
                     mask=store_mask,
@@ -607,9 +634,10 @@ class LMCacheConnectorV1Impl:
             store_mask[:skip_leading_tokens] = False
 
             logger.info(
-                "Storing KV cache for %d out of %d tokens for request %s",
+                "Storing KV cache for %d out of %d tokens "
+                "(skip_leading_tokens=%d) for request %s",
                 len(token_ids) - skip_leading_tokens, len(token_ids),
-                request.req_id)
+                skip_leading_tokens, request.req_id)
             self.lmcache_engine.store(token_ids,
                                       mask=store_mask,
                                       kvcaches=kvcaches,
@@ -657,8 +685,8 @@ class LMCacheConnectorV1Impl:
         need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
         logger.info(
-            "Reqid: %s, Total tokens %d, LMCache hit tokens: %d, "
-            "need to load: %d", request.request_id, request.num_tokens,
+            "Reqid: %s, Total tokens %d, num_computed_tokens %d, LMCache hit tokens: %d, "
+            "need to load: %d", request.request_id, request.num_tokens, num_computed_tokens,
             num_external_hit_tokens, need_to_allocate)
 
         if need_to_allocate <= 0:
