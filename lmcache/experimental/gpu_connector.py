@@ -461,7 +461,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                     "device should be provided to create a GPU buffer."
 
             # FIXME (Jiayi): Please remove this hardcode
-            max_tokens = 32000
+            max_tokens = 320000
             shape = self.get_shape(max_tokens)
             self.dtype = kwargs["dtype"]
             self.device = kwargs["device"]
@@ -471,6 +471,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             # All sizes are in bytes
             element_size = torch.tensor([], dtype=self.dtype).element_size()
             gpu_buffer_size = num_elements * element_size
+            logger.info(f'blankdebug Shape: {shape}, Element size: {element_size}, gpu_buffer_size: {gpu_buffer_size}')
             self.gpu_buffer_allocator = GPUMemoryAllocator(gpu_buffer_size,
                                                            device=self.device)
 

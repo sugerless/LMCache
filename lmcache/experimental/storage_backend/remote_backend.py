@@ -227,7 +227,42 @@ class RemoteBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[Future]:
-        raise NotImplementedError
+        """
+        Non-blocking get function for RemoteBackend.
+        Returns a Future that will produce a deserialized MemoryObj.
+        """
+        if self.connection is None:
+            logger.warning("Connection is None in get_non_blocking, returning None")
+            return None
+
+        try:
+            raw_future = asyncio.run_coroutine_threadsafe(
+                self.connection_get_wrapper(key), self.loop
+            )
+        except Exception as e:
+            logger.warning(f"Failed to submit coroutine for key {key}: {e}")
+            return None
+    
+        final_future = Future()
+
+        def _on_raw_done(fut: Future):
+            try:
+                result = fut.result()
+                if result is None:
+                    logger.debug(f"No result for key {key}, setting None")
+                    final_future.set_result(None)
+                    return
+
+                mem_obj = self.deserializer.deserialize(result)
+                final_future.set_result(mem_obj)
+
+            except Exception as e:
+                logger.warning(f"Exception during RemoteBackend.get_non_blocking for key {key}: {e}")
+                final_future.set_result(None)
+
+        raw_future.add_done_callback(_on_raw_done)
+        return raw_future
+       
 
     async def connection_put_wrapper(self, key: CacheEngineKey,
                                      memory_obj: MemoryObj):
@@ -255,10 +290,10 @@ class RemoteBackend(StorageBackendInterface):
         return memory_obj
 
     def pin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        pass
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        raise NotImplementedError
+        pass
 
     def close(self):
         try:

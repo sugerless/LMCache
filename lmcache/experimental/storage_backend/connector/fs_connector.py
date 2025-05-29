@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import asyncio
+import aiofiles
+
 from pathlib import Path
 from typing import List, Optional, no_type_check
 
@@ -27,7 +29,7 @@ from lmcache.utils import CacheEngineKey
 
 logger = init_logger(__name__)
 
-METADATA_BYTES_LEN = 28
+METADATA_BYTES_LEN = 32
 
 
 class FSConnector(RemoteConnector):
@@ -63,18 +65,19 @@ class FSConnector(RemoteConnector):
     async def exists(self, key: CacheEngineKey) -> bool:
         """Check if key exists in file system"""
         file_path = self._get_file_path(key)
-        return file_path.exists()
+        res = file_path.exists()
+        return res
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Get data from file system"""
         file_path = self._get_file_path(key)
         if not file_path.exists():
+            logger.error(f"blankdebug file not exist {file_path}, cachekey: {key}")
             return None
-
         try:
-            # Read file content
-            with open(file_path, 'rb') as f:
-                data = f.read()
+            # 异步读取文件内容
+            async with aiofiles.open(file_path, 'rb') as f:
+                data = await f.read()
 
             # Split metadata and actual data
             metadata = RemoteMetadata.deserialize(
@@ -117,12 +120,9 @@ class FSConnector(RemoteConnector):
                                       memory_obj.get_shape(),
                                       memory_obj.get_dtype(),
                                       memory_obj.get_memory_format())
-
             # Write to file (metadata + data)
-            with open(temp_path, 'wb') as f:
-                f.write(metadata.serialize())
-                f.write(memory_obj.byte_array)
-
+            async with aiofiles.open(temp_path, 'wb') as f:
+                await f.write(metadata.serialize() + memory_obj.byte_array)
             # Atomically rename temp file to final destination
             temp_path.replace(final_path)
 

@@ -707,7 +707,9 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
             for key_single_layer in key_all_layers:
                 if not self.storage_manager.contains(key_single_layer,
                                                      search_range, pin):
+                    logger.info(f'blankdebug lookup layer nums: {self.num_layers}, start: {start}, key: {key_single_layer}')
                     return start
+        logger.info(f'blankdebug lookup layer nums: {self.num_layers}, end: {end}')
         return end
 
 
