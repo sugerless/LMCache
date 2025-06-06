@@ -76,10 +76,12 @@ Documentation
 
    kv_cache/cpu_ram
    kv_cache/local_storage
+   kv_cache/gds
    kv_cache/redis
    kv_cache/infinistore
    kv_cache/mooncake
    kv_cache/valkey
+   kv_cache/weka
 
 :raw-html:`<br />`
 
@@ -130,6 +132,7 @@ Documentation
 
    developer_guide/contributing
    developer_guide/docker_file
+   developer_guide/usage/index
 
 :raw-html:`<br />`
 
@@ -148,3 +151,6 @@ Documentation
 
    community/meetings
    community/blogs
+
+raw-html:`<br />`
+   
