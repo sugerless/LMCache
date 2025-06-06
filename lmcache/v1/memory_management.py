@@ -22,7 +22,6 @@ import ctypes
 import threading
 
 # Third Party
-from cufile.bindings import cuFileBufDeregister, cuFileBufRegister
 import sortedcontainers
 import torch
 
@@ -358,16 +357,6 @@ class TensorMemoryObj(MemoryObj):
     @property
     def is_pinned(self) -> bool:
         return self.metadata.is_pin
-
-
-# TODO(Jiayi): Need to make this compatible with pin/unpin semantics
-class CopyLessMemoryObj(TensorMemoryObj):
-    def __init__(self, raw_data, metadata, callback, parent_allocator=None):
-        super().__init__(raw_data, metadata, parent_allocator)
-        self.callback = callback
-
-    def __del__(self):
-        self.callback()
 
 
 class BytesBufferMemoryObj(MemoryObj):
@@ -998,6 +987,12 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
 
 class CuFileMemoryAllocator(GPUMemoryAllocator):
     def __init__(self, size: int, device=None):
+        # HACK(Jiayi): cufile import is buggy on some hardware
+        # (e.g., without GPUDirect), so it's temporarily put here.
+        # Third Party
+        from cufile.bindings import cuFileBufDeregister, cuFileBufRegister
+
+        self.cuFileBufDeregister = cuFileBufDeregister
         if device is None:
             # TODO(Serapheim): Ideally we'd get the device from the upper
             # layer - for now just use the current device.
@@ -1007,4 +1002,4 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         cuFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)
 
     def __del__(self):
-        cuFileBufDeregister(ctypes.c_void_p(self.base_pointer))
+        self.cuFileBufDeregister(ctypes.c_void_p(self.base_pointer))

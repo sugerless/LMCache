@@ -1,4 +1,5 @@
 # Copyright 2025 Ilya Yanok, Serapheim Dimitropoulos.
+# Copyright 2025 Dan Aloni
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,9 +40,13 @@ from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 logger = init_logger(__name__)
 
 _METADATA_FILE_SUFFIX = ".metadata"
-_DATA_FILE_SUFFIX = ".weka1"
+_DATA_FILE_SUFFIX = ".kvcache.bin"
 _METADATA_VERSION = 1
-_METADATA_MAX_SIZE = 4096  # reserve 4K for metadata
+_METADATA_MAX_SIZE = 4096  # reserve 4K for metadata.
+# TODO: This can compatible with the SafeTensors format, with first 4K of
+# the file being the meta-data. There's no need for a metadata file. So this
+# code in the future will just save a single '.safetensors' file. It is possible
+# to read this 4KB block without triggering read-ahead by various means.
 
 
 class UnsupportedMetadataVersion(Exception):
@@ -63,10 +68,33 @@ torch_dtypes = [
 dtype_to_idx = {dtype: idx for idx, dtype in enumerate(torch_dtypes)}
 
 
+def get_fstype(path):
+    with open("/proc/mounts", "r") as f:
+        lines = f.readlines()
+
+    # Find the best matching mount point
+    best_match = ""
+    best_fstype = ""
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 3:
+            _, mount_point, fstype = parts[0], parts[1], parts[2]
+            if path.startswith(mount_point) and len(mount_point) > len(best_match):
+                best_match = mount_point
+                best_fstype = fstype
+
+    if not best_fstype:
+        raise RuntimeError(f"Unable to detect fstype for {path}")
+
+    return best_fstype
+
+
 def pack_metadata(shape, dtype, size) -> bytes:
+    # TODO: we can easily become SafeTensors compatible by taking some
+    # code from: https://github.com/vast-data/VUA/blob/main/src/vua/serdes.py,
+    # there's no need to invent a new format.
     metadata_desc = "<QQQQ" + len(shape) * "Q"
     if struct.calcsize(metadata_desc) > _METADATA_MAX_SIZE:
-        # TODO(Serapheim/Ilya): support variable offset for data
         raise ValueError(
             f"Metadata size {struct.calcsize(metadata_desc)} "
             f"exceeds max size {_METADATA_MAX_SIZE}"
@@ -80,9 +108,6 @@ def unpack_metadata(buffer):
     version, dt_idx, size, ndim = struct.unpack_from("<QQQQ", buffer)
     shape_offset = struct.calcsize("<QQQQ")
     if version != _METADATA_VERSION:
-        # TODO(Serapheim): When we bump the _METADATA_VERSION for
-        # the first time, we need to ensure that we can still
-        # read older versions.
         raise UnsupportedMetadataVersion(f"Unsupported metadata version: {version}")
     shape = struct.unpack_from("<" + ndim * "Q", buffer, offset=shape_offset)
     return torch.Size(shape), torch_dtypes[dt_idx], size
@@ -101,30 +126,20 @@ async def save_metadata(path: str, tmp: str, metadata: bytes):
     os.rename(tmp_path, path)
 
 
-class WekaGdsBackend(StorageBackendInterface):
+class GdsBackend(StorageBackendInterface):
     """
-    This is a backend that leverages NVIDIA's cuFile API to issue GDS requests
-    directly to the Weka Filesystem.  In order to use it, users need to specify
-    `weka_path` and `cufile_buffer_size` in their LMCache config.
+    Originally based on the open sourced WekaGdsBackend, this is a backend that
+    leverages NVIDIA's cuFile API to issue GDS requests directly to the
+    GDS-supported remote filesystem.  In order to use it, users need to specify
+    `gds_path` and `cufile_buffer_size` in their LMCache config.
 
     Cache Directory Structure created by this Backend:
-    /{weka_path}/{first_level}/{second_level}/{data & metadata}
-    This structure is semi-arbitrary. WekaFS can handle/scale many small files
-    into a single directory so we could just put all the data/metadata directly
-    under the weka_path, but we create two levels in the directory hierarchy to
+    /{gds_path}/{first_level}/{second_level}/{data & metadata} This structure
+    is semi-arbitrary. We create two levels in the directory hierarchy to
     parallelize loading the data during initialization in the Python code.
 
-    NOTE: The `weka_path` does not strictly need to be a WekaFS mount so if you
-    want to test the backend without Weka you are free to do so for testing
-    purposes. For production though it wouldn't scale as this backend is
-    tailored to the performance characteristics of WekaFS. More specifically if
-    used with non-Weka filesystems performance will suffer potentially for two
-    reasons:
-    (1) If GPUDirect is not supported on that other filesystem, then CuFile will
-        fall back to POSIX I/O.
-    (2) Our cache directory structure creates a lot of small files within a
-        single directory and uses 4K block/buffer sizes. These align very well
-        with Weka but not other filesystems.
+    NOTE: If GPUDirect is not supported on that other filesystem, then CuFile will
+    fall back to POSIX I/O.
     """
 
     def __init__(
@@ -149,14 +164,20 @@ class WekaGdsBackend(StorageBackendInterface):
         self.memory_allocator = memory_allocator
         self.dst_device = dst_device
 
-        assert config.weka_path is not None, (
-            "Need to specify weka_path for WekaGdsBackend"
-        )
-        self.weka_path = config.weka_path
-        if not os.path.exists(self.weka_path):
-            os.makedirs(self.weka_path, exist_ok=True)
+        assert config.gds_path is not None, "Need to specify gds_path for GdsBackend"
+        self.gds_path = config.gds_path
+        self.fstype = get_fstype(config.gds_path)
 
-        self.stats = None  # TODO(Serapheim): plug into LMCache Statistics
+        # Log the fstype - this is useful in reports and varying optimizations
+        # based on the kind of fstype used.
+        logger.info(
+            f"GDS backend using fstype '{self.fstype}' on path '{self.gds_path}'"
+        )
+
+        if not os.path.exists(self.gds_path):
+            os.makedirs(self.gds_path, exist_ok=True)
+
+        self.stats = None  # TODO: plug into LMCache Statistics
 
         self.hot_lock = threading.Lock()
         self.hot_cache: OrderedDict[CacheEngineKey, DiskCacheMetadata] = OrderedDict()
@@ -178,12 +199,12 @@ class WekaGdsBackend(StorageBackendInterface):
         self.save_metadata_tasks: set[asyncio.Task] = set()
 
     async def _scan_metadata(self):
-        # TODO(Serapheim): even though we only run it once on startup,
-        # this is still not super scalable maybe we need to add metadata
-        # snapshotting later.
+        # TODO: even though we only run it once on startup, this is still
+        # not super scalable - test whether Rust code will be faster here, or
+        # whether we can serialize meta-data in groups for faster loading.
         tasks = []
         start = time.perf_counter()
-        with os.scandir(self.weka_path) as it:
+        with os.scandir(self.gds_path) as it:
             for entry in it:
                 if not entry.is_dir():
                     continue
@@ -193,11 +214,11 @@ class WekaGdsBackend(StorageBackendInterface):
                 tasks.append(
                     asyncio.to_thread(
                         self._scan_metadata_subdir,
-                        os.path.join(self.weka_path, l1_dir),
+                        os.path.join(self.gds_path, l1_dir),
                         l1_dir,
                     )
                 )
-        # TODO(Serapheim): If Python 3.11+, can we use TaskGroup instead?
+        # TODO: If Python 3.11+, can we use TaskGroup instead?
         await asyncio.gather(*tasks)
         end = time.perf_counter()
         logger.info(
@@ -254,7 +275,7 @@ class WekaGdsBackend(StorageBackendInterface):
         return self.__class__.__name__
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
-        # TODO(Serapheim): implement pin() semantics
+        # TODO: implement pin() semantics
         with self.hot_lock:
             res = key in self.hot_cache
         if res:
@@ -283,7 +304,7 @@ class WekaGdsBackend(StorageBackendInterface):
         assert "_" not in key_str, "key string should not contain `_`"
         return (
             os.path.join(
-                self.weka_path,
+                self.gds_path,
                 l1_dir,
                 l2_dir,
                 key_str.replace("/", "_") + _DATA_FILE_SUFFIX,
@@ -322,8 +343,11 @@ class WekaGdsBackend(StorageBackendInterface):
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
         path, subdir_key, l1_dir, l2_dir = self._key_to_path(key)
+        # TODO: maybe remove `metadata_dirs` and insert mkdir calls
+        # only for the case where creating the CuFile fails on ENOENT. It
+        # also makes the code more resilient to out-of-band deletions
         if subdir_key not in self.metadata_dirs:
-            os.makedirs(os.path.join(self.weka_path, l1_dir, l2_dir), exist_ok=True)
+            os.makedirs(os.path.join(self.gds_path, l1_dir, l2_dir), exist_ok=True)
             self.metadata_dirs.add(subdir_key)
         tmp = ".tmp" + rand_suffix(self.rand, 8)
         metadata = await asyncio.to_thread(
@@ -433,7 +457,7 @@ class WekaGdsBackend(StorageBackendInterface):
                 with self.hot_lock:
                     self.hot_cache.pop(key)
             else:
-                # TODO(Serapheim): we should probably count errors and
+                # TODO: we should probably count errors and
                 # remove the entry if it's a persistent problem.
                 logger.error(
                     f"Error loading {path}: got only {ret} bytes "
@@ -447,7 +471,7 @@ class WekaGdsBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[Future]:
-        # TODO(Serapheim): Using a dummy wrapper around prefetch for now.
+        # TODO: Using a dummy wrapper around prefetch for now.
         return self.submit_prefetch_task(key)
 
     @_lmcache_nvtx_annotate
@@ -484,14 +508,14 @@ class WekaGdsBackend(StorageBackendInterface):
 
     def _load_gds_cufile(
         self,
-        file_path: str,
+        gds_path: str,
         file_offset: int,
         gpu_pointer: ctypes.c_void_p,
         size_in_bytes: int,
         dev_offset: int,
     ) -> int:
         # Read data from disk into a GPU buffer
-        with self.cufile.CuFile(file_path, "r") as f:
+        with self.cufile.CuFile(gds_path, "r") as f:
             return f.read(
                 gpu_pointer,
                 size_in_bytes,
@@ -500,12 +524,12 @@ class WekaGdsBackend(StorageBackendInterface):
             )
 
     def pin(self, key: CacheEngineKey) -> bool:
-        # TODO(Serapheim): Implement this
+        # TODO: Implement this
         raise NotImplementedError
 
     def unpin(self, key: CacheEngineKey) -> bool:
-        # TODO(Serapheim): Implement this
+        # TODO: Implement this
         raise NotImplementedError
 
     def close(self) -> None:
-        logger.info("Weka backend closed.")
+        logger.info("GDS backend closed.")

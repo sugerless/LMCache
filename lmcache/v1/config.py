@@ -15,6 +15,7 @@
 # Standard
 from dataclasses import dataclass
 from typing import Any, Optional
+import json
 import os
 import re
 
@@ -98,11 +99,16 @@ class LMCacheEngineConfig:
     # The url of the actual remote lmcache instance for auditing
     audit_actual_remote_url: Optional[str] = None
 
-    # (Optional) Weka/CuFile related configurations
     # The path under the WekaFS mount that the cache will be stored
     weka_path: Optional[str] = None
+    # (Optional) The path under the File-based backend cache will be stored
+    gds_path: Optional[str] = None
+    # (Optional) GDS/CuFile related configurations
     # Size of CuFile Buffer in MiB
     cufile_buffer_size: Optional[int] = None
+
+    # The extra config
+    extra_config: Optional[dict] = None
 
     @staticmethod
     def from_defaults(
@@ -134,6 +140,9 @@ class LMCacheEngineConfig:
         nixl_buffer_device: Optional[str] = None,
         nixl_enable_gc: Optional[bool] = False,
         audit_actual_remote_url: Optional[str] = None,
+        weka_path: Optional[str] = None,
+        cufile_buffer_size: Optional[int] = None,
+        extra_config: Optional[dict] = None,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -165,6 +174,9 @@ class LMCacheEngineConfig:
             nixl_buffer_device,
             nixl_enable_gc,
             audit_actual_remote_url,
+            weka_path,
+            cufile_buffer_size,
+            extra_config,
         ).validate()
 
     @staticmethod
@@ -293,6 +305,10 @@ class LMCacheEngineConfig:
         nixl_buffer_device = config.get("nixl_buffer_device", None)
         nixl_enable_gc = config.get("nixl_enable_gc", False)
 
+        extra_config = config.get("extra_config", None)
+        if extra_config is not None:
+            assert isinstance(extra_config, dict), "extra_config must be a dict"
+
         # Try getting "legacy" nixl config
         if nixl_receiver_host is None:
             nixl_receiver_host = config.get("nixl_peer_host", None)
@@ -313,6 +329,7 @@ class LMCacheEngineConfig:
         audit_actual_remote_url = config.get("audit_actual_remote_url", None)
 
         weka_path = config.get("weka_path", None)
+        gds_path = config.get("gds_path", None)
         cufile_buffer_size = config.get("cufile_buffer_size", None)
 
         local_disk_path = _parse_local_disk(local_disk)
@@ -356,7 +373,9 @@ class LMCacheEngineConfig:
                 nixl_enable_gc,
                 audit_actual_remote_url,
                 weka_path,
+                gds_path,
                 cufile_buffer_size,
+                extra_config,
             )
             .validate()
             .log_config()
@@ -395,6 +414,13 @@ class LMCacheEngineConfig:
             if value is None:
                 return 0.0
             return float(value)
+
+        def to_dict(value: Optional[str]) -> Optional[dict]:
+            if value is None:
+                return None
+            res = json.loads(value)
+            assert isinstance(res, dict), "value must be a dict"
+            return res
 
         config = LMCacheEngineConfig.from_defaults(remote_url=None, remote_serde=None)
         config.chunk_size = to_int(
@@ -515,10 +541,15 @@ class LMCacheEngineConfig:
             get_env_name("weka_path"),
             config.weka_path,
         )
+        config.gds_path = parse_env(
+            get_env_name("gds_path"),
+            config.gds_path,
+        )
         config.cufile_buffer_size = parse_env(
             get_env_name("cufile_buffer_size"),
             config.cufile_buffer_size,
         )
+        config.extra_config = to_dict(parse_env(get_env_name("extra_config"), None))
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -597,6 +628,8 @@ class LMCacheEngineConfig:
             "nixl_buffer_device": self.nixl_buffer_device,
             "nixl_enable_gc": self.nixl_enable_gc,
             "weka_path": self.weka_path,
+            "gds_path": self.gds_path,
+            "extra_config": self.extra_config,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 

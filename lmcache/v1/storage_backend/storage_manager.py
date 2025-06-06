@@ -66,7 +66,6 @@ class StorageManager:
         allocator: MemoryAllocatorInterface,
         lmcache_worker: Optional["LMCacheWorker"] = None,
         lookup_server: Optional[LookupServerInterface] = None,
-        layerwise: bool = False,
     ):
         self.memory_allocator = allocator
 
@@ -85,7 +84,6 @@ class StorageManager:
                 dst_device,
                 lmcache_worker,
                 lookup_server,
-                layerwise,
             )
         )
         self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
@@ -150,9 +148,7 @@ class StorageManager:
         # configure caching policies (e.g., write-through,
         # write-back, etc.)
         for storage_backend in self.storage_backends.values():
-            if storage_backend.exists_in_put_tasks(key) or storage_backend.contains(
-                key
-            ):
+            if storage_backend.exists_in_put_tasks(key):
                 memory_obj.ref_count_down()
                 return
 
