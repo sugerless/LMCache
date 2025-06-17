@@ -671,10 +671,14 @@ class LMCacheConnectorV1Impl:
             # 0 if there is no local storage configured. In this case, we
             # should rely on the slip_leading_tokens in save_spec to avoid
             # transmit the already saved tokens again.
+            import time
+            begin = time.perf_counter()
             skip_leading_tokens = max(
                 self.lmcache_engine.lookup(token_ids),
                 save_spec.skip_leading_tokens,
             )
+            end = time.perf_counter()
+            logger.info(f'[blankdebug] wait_for_save lookup in {(end - begin) * 1000:.3f}ms')
             if skip_leading_tokens == len(token_ids):
                 continue  # skip this request
             # Align to lmcache chunk size

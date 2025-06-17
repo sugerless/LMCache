@@ -16,7 +16,9 @@
 from pathlib import Path
 from typing import List, Optional, no_type_check
 import asyncio
-
+import aiofiles
+import aiofiles.os
+import redis.asyncio as redis_async
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -27,7 +29,7 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
-METADATA_BYTES_LEN = 28
+METADATA_BYTES_LEN = 32
 
 
 class FSConnector(RemoteConnector):
@@ -58,6 +60,8 @@ class FSConnector(RemoteConnector):
         # Create base directory if not exists
         self.base_path.mkdir(parents=True, exist_ok=True)
 
+        self.redis_connection = redis_async.Redis(host='0.0.0.0', port=6379)
+
     def _get_file_path(self, key: CacheEngineKey) -> Path:
         """Get file path for the given key"""
         key_path = key.to_string().replace("/", "-") + ".data"
@@ -66,42 +70,49 @@ class FSConnector(RemoteConnector):
 
     async def exists(self, key: CacheEngineKey) -> bool:
         """Check if key exists in file system"""
-        file_path = self._get_file_path(key)
-        return file_path.exists()
+        # file_path = self._get_file_path(key)
+        # return await aiofiles.os.path.exists(file_path)
+        try:
+            # 使用 await 调用异步的 sismember 方法
+            is_member = await self.redis_connection.sismember("cached_chunk_keys", key.to_string())
+            logger.info(f'blankdebug redis is_member: {is_member}')
+            # sismember 通常返回 1 (True) 或 0 (False)
+            return bool(is_member)
+        except Exception as e: # 捕获可能的 Redis 连接错误等
+            logger.error(f"Redis sismember failed for key {key.to_string()}: {e}", exc_info=True)
+            return False # 在 Redis 操作失败时，保守地返回 False
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Get data from file system"""
         file_path = self._get_file_path(key)
-        if not file_path.exists():
-            return None
 
         try:
-            # Read file content
-            with open(file_path, "rb") as f:
-                data = f.read()
+            async with aiofiles.open(file_path, "rb") as f:
+                # Read metadata buffer first to get shape, dtype, fmt
+                # to be able to allocate memory object for the data and read into it
+                md_buffer = bytearray(METADATA_BYTES_LEN)
+                num_read = await f.readinto(md_buffer)
+                if num_read != len(md_buffer):
+                    raise RuntimeError(
+                        f"Partial read meta {len(md_buffer)} got {num_read}"
+                    )
 
-            # Split metadata and actual data
-            metadata = RemoteMetadata.deserialize(memoryview(data[:METADATA_BYTES_LEN]))
-            kv_bytes = data[METADATA_BYTES_LEN : METADATA_BYTES_LEN + metadata.length]
+                # Deserialize metadata and allocate memory
+                metadata = RemoteMetadata.deserialize(md_buffer)
+                memory_obj = self.local_cpu_backend.allocate(
+                    metadata.shape, metadata.dtype, metadata.fmt
+                )
+                if memory_obj is None:
+                    logger.debug("Memory allocation failed during async disk load.")
+                    return None
 
-            # Allocate memory and copy data
-            memory_obj = self.local_cpu_backend.allocate(
-                metadata.shape,
-                metadata.dtype,
-                metadata.fmt,
-            )
-            if memory_obj is None:
-                logger.warning("Failed to allocate memory during file read")
-                return None
-
-            if isinstance(memory_obj.byte_array, memoryview):
-                view = memory_obj.byte_array
-                if view.format == "<B":
-                    view = view.cast("B")
-            else:
-                view = memoryview(memory_obj.byte_array)
-            view[: metadata.length] = kv_bytes
-
+                # Read the actual data into allocated memory
+                buffer = memory_obj.byte_array
+                num_read = await f.readinto(buffer)
+                if num_read != len(buffer):
+                    raise RuntimeError(
+                        f"Partial read data {len(buffer)} got {num_read}"
+                    )
             return memory_obj
 
         except Exception as e:
@@ -115,25 +126,26 @@ class FSConnector(RemoteConnector):
 
         try:
             # Prepare metadata
+            buffer = memory_obj.byte_array
             metadata = RemoteMetadata(
-                len(memory_obj.byte_array),
+                len(buffer),
                 memory_obj.get_shape(),
                 memory_obj.get_dtype(),
                 memory_obj.get_memory_format(),
             )
 
             # Write to file (metadata + data)
-            with open(temp_path, "wb") as f:
-                f.write(metadata.serialize())
-                f.write(memory_obj.byte_array)
-
+            async with aiofiles.open(temp_path, "wb") as f:
+                await f.write(metadata.serialize())
+                await f.write(buffer)
             # Atomically rename temp file to final destination
-            temp_path.replace(final_path)
+            await aiofiles.os.replace(temp_path, final_path)
 
+            await self.redis_connection.sadd("cached_chunk_keys", key.to_string())
         except Exception as e:
             logger.error(f"Failed to write file {final_path}: {str(e)}")
-            if temp_path.exists():
-                temp_path.unlink()  # Remove corrupted file
+            if await aiofiles.os.path.exists(temp_path):
+                await aiofiles.os.unlink(temp_path)  # Remove corrupted file
             raise
 
     @no_type_check
@@ -143,5 +155,6 @@ class FSConnector(RemoteConnector):
 
     async def close(self):
         """Clean up resources"""
+        await self.redis_connection.close()
         logger.info("Closed the file system connector")
 

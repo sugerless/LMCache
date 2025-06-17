@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # Standard
+import time
 from collections import OrderedDict
 from concurrent.futures import Future
 from typing import (
@@ -141,13 +142,16 @@ class StorageManager:
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
         """
+        start = time.perf_counter()
+        logger.info(f"[blankdebug] put() start: key={key}")
 
         # TODO(Jiayi): currently, the entire put task will be cancelled
         # if one of the backend is already storing this cache.
         # This might not be ideal. We need a caching policy to
         # configure caching policies (e.g., write-through,
         # write-back, etc.)
-        for storage_backend in self.storage_backends.values():
+        for backend_name, storage_backend in self.storage_backends.items():
+            logger.info(f'blankdebug now backend_name is {backend_name}')
             if storage_backend.exists_in_put_tasks(key):
                 memory_obj.ref_count_down()
                 return
@@ -160,6 +164,8 @@ class StorageManager:
                 continue
 
         memory_obj.ref_count_down()
+        elapsed = (time.perf_counter() - start) * 1000
+        logger.info(f"[blankdebug] put() end: key={key}, elapsed={elapsed:.2f} ms")
 
     def batched_put(
         self,
@@ -330,8 +336,8 @@ class StorageManager:
 
         return: True if the key exists in the specified storage backends.
         """
-
         for backend_name, backend in self.storage_backends.items():
+            logger.info(f'blankdebug storageManager contains, now is {backend_name}')
             if search_range is not None and backend_name not in search_range:
                 continue
 

@@ -274,7 +274,6 @@ class LocalCPUBackend(StorageBackendInterface):
                 self.lmcache_worker.put_msg(
                     KVAdmitMsg(self.instance_id, key.worker_id, key.chunk_hash, "cpu")
                 )
-
             logger.debug("Updated hot cache!")
         else:
             self.cpu_lock.acquire()

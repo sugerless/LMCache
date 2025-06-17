@@ -481,7 +481,7 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
             )
 
             # FIXME (Jiayi): Please remove this hardcode
-            max_tokens = 32000
+            max_tokens = 320000
             shape = self.get_shape(max_tokens)
             self.dtype = kwargs["dtype"]
             self.device = kwargs["device"]

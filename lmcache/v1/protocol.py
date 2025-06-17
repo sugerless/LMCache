@@ -72,15 +72,18 @@ class RemoteMetadata:
     fmt: MemoryFormat
 
     def serialize_into(self, buffer):
-        assert len(self.shape) == 4, "Shape dimension should be 4"
+        dim_count = len(self.shape)
+        padded_shape = list(self.shape) + [0] * (4 - dim_count)
+        assert (1 <= len(self.shape) <= 4), "Shape dimension should be 4"
 
         struct.pack_into(
-            "iiiiiii",
+            "iiiiiiii",
             buffer,
             0,
             self.length,
             int(self.fmt.value),
             DTYPE_TO_INT[self.dtype],
+            dim_count,
             self.shape[0],
             self.shape[1],
             self.shape[2],
@@ -90,13 +93,16 @@ class RemoteMetadata:
     def serialize(self) -> bytes:
         # NOTE(Jiayi): 4 is the maximum dimension of memory object.
         # Pass in shape [x, 0, 0, 0] if it is a bytes memory object
-        assert len(self.shape) == 4, "Shape dimension should be 4"
+        dim_count = len(self.shape)
+        padded_shape = list(self.shape) + [0] * (4 - dim_count)
+        assert (1 <= len(self.shape) <= 4), "Shape dimension should be 4"
 
         packed_bytes = struct.pack(
-            "iiiiiii",
+            "iiiiiiii",
             self.length,
             int(self.fmt.value),
             DTYPE_TO_INT[self.dtype],
+            dim_count,
             self.shape[0],
             self.shape[1],
             self.shape[2],
@@ -106,12 +112,13 @@ class RemoteMetadata:
 
     @staticmethod
     def deserialize(s: bytes) -> "RemoteMetadata":
-        length, fmt, dtype, shape0, shape1, shape2, shape3 = struct.unpack_from(
-            "iiiiiii", s
+        length, fmt, dtype, dim_count, shape0, shape1, shape2, shape3 = struct.unpack_from(
+            "iiiiiiii", s
         )
+        shape_list = [shape0, shape1, shape2, shape3][:dim_count]
         return RemoteMetadata(
             length,
-            torch.Size([shape0, shape1, shape2, shape3]),
+            torch.Size(shape_list),
             INT_TO_DTYPE[dtype],
             MemoryFormat(fmt),
         )

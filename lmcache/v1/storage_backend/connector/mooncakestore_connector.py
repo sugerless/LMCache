@@ -34,7 +34,7 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
-METADATA_BYTES_LEN = 28
+METADATA_BYTES_LEN = 32
 
 
 @dataclass

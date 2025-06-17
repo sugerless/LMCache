@@ -260,7 +260,7 @@ class LMCacheEngine:
 
         for start, end, key in self.token_database.process_tokens(tokens, mask):
             assert isinstance(key, CacheEngineKey)
-            if self.storage_manager.contains(key):
+            if self.storage_manager.contains(key, ['LocalCPUBackend']):
                 continue
             # Allocate the memory object
             num_tokens = end - start
@@ -268,7 +268,7 @@ class LMCacheEngine:
             kv_dtype = self.metadata.kv_dtype
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
             if memory_obj is None:
-                logger.warning(
+                logger.error(
                     "Failed to allocate memory for the KV cache.\n"
                     "The KV cache will not be stored."
                 )
@@ -321,11 +321,14 @@ class LMCacheEngine:
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
+        import time
+        total = 0
         for start, end, key in self.token_database.process_tokens(tokens, mask):
             assert isinstance(key, CacheEngineKey)
-
-            # Get the memory object from the storage backend
+            on = time.perf_counter()            # Get the memory object from the storage backend
             memory_obj = self.storage_manager.get(key)
+            off = time.perf_counter()
+            total = total + (off - on)
 
             if memory_obj is None:
                 if self.enable_p2p:
@@ -354,10 +357,11 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.debug(
+        logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"
+            f"retrieve trans total time {total * 1000:.3f}ms"
         )
         return ret_mask
 
@@ -398,7 +402,7 @@ class LMCacheEngine:
         search_local = True  # we always lookup local storage_manager first
         # secondary lookup on p2p (via lookup_server) if enabled
         search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
-
+        logger.info(f'[blankdebug] serach_loacl: {search_range}')
         for start, end, key in self.token_database.process_tokens(tokens):
             assert isinstance(key, CacheEngineKey)
             if search_local:
@@ -638,12 +642,14 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
         ends = []
         keys = []
         for start, end, key in self.token_database.process_tokens(tokens, mask):
+            logger.info(f"[blankdebug] token segment: {start}-{end}, key={key}")
             assert isinstance(key, CacheEngineKey)
 
             keys_multi_layer = key.split_layers(self.num_layers)
 
             # NOTE: Only check the first layer
             if not self.storage_manager.contains(keys_multi_layer[0]):
+                logger.info(f"[blankdebug] Key not found in storage: {keys_multi_layer[0]}")
                 break
 
             starts.append(start)
@@ -680,16 +686,15 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
 
             for mem_obj in to_count_down:
                 mem_obj.ref_count_down()
+            
+            yield None
+            # synchronize the last layer
+            next(mem_obj_consumer)
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
-            for layer_id in range(self.num_layers):
+            for layer_id in range(self.num_layers + 1):
                 yield None
-
-        yield None
-
-        # synchronize the last layer
-        next(mem_obj_consumer)
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
@@ -732,7 +737,9 @@ class LayerwiseLMCacheEngine(LMCacheEngine):
                 if not self.storage_manager.contains(
                     key_single_layer, search_range, pin
                 ):
+                    logger.info(f'blankdebug lookup layer nums: {self.num_layers}, start: {start}, key: {key_single_layer}')
                     return start
+        logger.info(f'blankdebug lookup layer nums: {self.num_layers}, end: {end}')
         return end
 
 

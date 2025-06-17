@@ -234,16 +234,16 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning("Connection is None in get_non_blocking, returning None")
             return None
 
+        final_future = Future()
         try:
             raw_future = asyncio.run_coroutine_threadsafe(
-                self.connection_get_wrapper(key), self.loop
+                self.connection.get(key), self.loop
             )
         except Exception as e:
             logger.warning(f"Failed to submit coroutine for key {key}: {e}")
+            final_future.set_result(None)
             return None
     
-        final_future = Future()
-
         def _on_raw_done(fut: Future):
             try:
                 result = fut.result()
@@ -260,7 +260,7 @@ class RemoteBackend(StorageBackendInterface):
                 final_future.set_result(None)
 
         raw_future.add_done_callback(_on_raw_done)
-        return raw_future
+        return final_future 
        
 
     def pin(self, key: CacheEngineKey) -> bool:
