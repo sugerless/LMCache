@@ -53,6 +53,8 @@ class LMCacheEngineConfig:
     remote_url: Optional[str]
     remote_serde: Optional[str]  # Can be "naive" or "cachegen"
 
+    use_layerwise: bool  # whether to use layerwise pipelining
+
     save_decode_cache: bool  # whether to store decode kv cache
 
     # Blending related configurations
@@ -110,6 +112,10 @@ class LMCacheEngineConfig:
     # The extra config
     extra_config: Optional[dict] = None
 
+    # By default, all chunks are saved
+    # But in some scenarios, such as reuse, save unfull chunk is unnecessary
+    save_unfull_chunk: bool = True
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -119,6 +125,7 @@ class LMCacheEngineConfig:
         max_local_disk_size: int = 0,
         remote_url: Optional[str] = "lm://localhost:65432",
         remote_serde: Optional[str] = "naive",
+        use_layerwise: bool = False,
         save_decode_cache: bool = False,
         enable_blending: bool = False,
         blend_recompute_ratio: float = 0.15,
@@ -141,8 +148,10 @@ class LMCacheEngineConfig:
         nixl_enable_gc: Optional[bool] = False,
         audit_actual_remote_url: Optional[str] = None,
         weka_path: Optional[str] = None,
+        gds_path: Optional[str] = None,
         cufile_buffer_size: Optional[int] = None,
         extra_config: Optional[dict] = None,
+        save_unfull_chunk: bool = True,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         return LMCacheEngineConfig(
@@ -153,6 +162,7 @@ class LMCacheEngineConfig:
             max_local_disk_size,
             remote_url,
             remote_serde,
+            use_layerwise,
             save_decode_cache,
             enable_blending,
             blend_recompute_ratio,
@@ -175,8 +185,10 @@ class LMCacheEngineConfig:
             nixl_enable_gc,
             audit_actual_remote_url,
             weka_path,
+            gds_path,
             cufile_buffer_size,
             extra_config,
+            save_unfull_chunk,
         ).validate()
 
     @staticmethod
@@ -185,6 +197,7 @@ class LMCacheEngineConfig:
         backend: str = "cpu",
         remote_url: Optional[str] = "lm://localhost:65432",
         remote_serde: str = "naive",
+        use_layerwise: bool = False,
         save_decode_cache: bool = False,
         enable_blending: bool = False,
         blend_recompute_ratio: float = 0.15,
@@ -195,6 +208,7 @@ class LMCacheEngineConfig:
         lookup_url: Optional[str] = None,
         distributed_url: Optional[str] = None,
         error_handling: bool = False,
+        save_unfull_chunk: bool = True,
     ) -> "LMCacheEngineConfig":
         # TODO (ApostaC): Add nixl config
         if backend == "cpu":
@@ -237,22 +251,24 @@ class LMCacheEngineConfig:
             raise ValueError(f"Invalid backend: {backend}")
         return (
             LMCacheEngineConfig(
-                chunk_size,
-                local_cpu,
-                max_local_cpu_size,
-                local_disk,
-                max_local_disk_size,
-                remote_url,
-                remote_serde,
-                save_decode_cache,
-                enable_blending,
-                blend_recompute_ratio,
-                blend_min_tokens,
-                blend_special_str,
-                enable_p2p,
-                lookup_url,
-                distributed_url,
-                error_handling,
+                chunk_size=chunk_size,
+                local_cpu=local_cpu,
+                max_local_cpu_size=max_local_cpu_size,
+                local_disk=local_disk,
+                max_local_disk_size=max_local_disk_size,
+                remote_url=remote_url,
+                remote_serde=remote_serde,
+                use_layerwise=use_layerwise,
+                save_decode_cache=save_decode_cache,
+                enable_blending=enable_blending,
+                blend_recompute_ratio=blend_recompute_ratio,
+                blend_min_tokens=blend_min_tokens,
+                blend_special_str=blend_special_str,
+                enable_p2p=enable_p2p,
+                lookup_url=lookup_url,
+                distributed_url=distributed_url,
+                error_handling=error_handling,
+                save_unfull_chunk=save_unfull_chunk,
             )
             .validate()
             .log_config()
@@ -276,6 +292,8 @@ class LMCacheEngineConfig:
 
         remote_url = config.get("remote_url", None)
         remote_serde = config.get("remote_serde", "naive")
+
+        use_layerwise = config.get("use_layerwise", False)
 
         save_decode_cache = config.get("save_decode_cache", False)
 
@@ -332,6 +350,8 @@ class LMCacheEngineConfig:
         gds_path = config.get("gds_path", None)
         cufile_buffer_size = config.get("cufile_buffer_size", None)
 
+        save_unfull_chunk = config.get("save_unfull_chunk", True)
+
         local_disk_path = _parse_local_disk(local_disk)
 
         match remote_url:
@@ -351,6 +371,7 @@ class LMCacheEngineConfig:
                 max_local_disk_size,
                 remote_url,
                 remote_serde,
+                use_layerwise,
                 save_decode_cache,
                 enable_blending,
                 blend_recompute_ratio,
@@ -376,6 +397,7 @@ class LMCacheEngineConfig:
                 gds_path,
                 cufile_buffer_size,
                 extra_config,
+                save_unfull_chunk,
             )
             .validate()
             .log_config()
@@ -442,6 +464,11 @@ class LMCacheEngineConfig:
         config.remote_serde = parse_env(
             get_env_name("remote_serde"), config.remote_serde
         )
+
+        config.use_layerwise = to_bool(
+            parse_env(get_env_name("use_layerwise"), config.use_layerwise)
+        )
+
         config.save_decode_cache = to_bool(
             parse_env(get_env_name("save_decode_cache"), config.save_decode_cache)
         )
@@ -545,11 +572,16 @@ class LMCacheEngineConfig:
             get_env_name("gds_path"),
             config.gds_path,
         )
-        config.cufile_buffer_size = parse_env(
-            get_env_name("cufile_buffer_size"),
-            config.cufile_buffer_size,
+        config.cufile_buffer_size = to_int(
+            parse_env(
+                get_env_name("cufile_buffer_size"),
+                config.cufile_buffer_size,
+            )
         )
         config.extra_config = to_dict(parse_env(get_env_name("extra_config"), None))
+        config.save_unfull_chunk = to_bool(
+            parse_env(get_env_name("save_unfull_chunk"), config.save_unfull_chunk)
+        )
         return config.validate().log_config()
 
     def to_original_config(self) -> orig_config.LMCacheEngineConfig:
@@ -610,6 +642,7 @@ class LMCacheEngineConfig:
             "max_local_disk_size": f"{self.max_local_disk_size} GB",
             "remote_url": self.remote_url,
             "remote_serde": self.remote_serde,
+            "use_layerwise": self.use_layerwise,
             "save_decode_cache": self.save_decode_cache,
             "enable_blending": self.enable_blending,
             "blend_recompute_ratio": self.blend_recompute_ratio,
@@ -630,6 +663,7 @@ class LMCacheEngineConfig:
             "weka_path": self.weka_path,
             "gds_path": self.gds_path,
             "extra_config": self.extra_config,
+            "save_unfull_chunk": self.save_unfull_chunk,
         }
         logger.info(f"LMCache Configuration: {config_dict}")
 
