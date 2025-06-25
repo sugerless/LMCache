@@ -215,6 +215,15 @@ class MooncakestoreConnector:
 
     def exists(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())
+    
+    def batch_exists(self, keys: List[CacheEngineKey]) -> List[bool]:
+        key_strs = [key.to_string() for key in keys]
+        try:
+            results = self.store.batch_is_exist(key_strs)
+        except Exception as e:
+            logger.error(f"Failed to check existence of keys: {e}")
+            return [False] * len(keys)
+        return [result == 1 for result in results]
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         if self.metadata_context is None:
@@ -448,6 +457,54 @@ class MooncakestoreConnector:
             )
         except Exception as e:
             logger.error(f"Failed to put key {key_str},data: {type(memory_obj)}: {e}")
+
+    async def batch_put(self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]):
+        key_strs = [key.to_string() for key in keys]
+        buffer_ptrs = []
+        buffer_sizes = []
+        valid_indices = []
+
+        for i, memory_obj in enumerate(memory_objs):
+            if hasattr(memory_obj, "tensor") and memory_obj.tensor is not None:
+                buffer_ptrs.append(memory_obj.tensor.data_ptr())
+                buffer_sizes.append(
+                    memory_obj.tensor.numel() * memory_obj.tensor.element_size()
+                )
+                valid_indices.append(i)
+            else:
+                logger.warning(
+                    f"Skipping key {key_strs[i]} in batch_put as it does not have a tensor."
+                )
+
+        if not valid_indices:
+            return
+
+        valid_key_strs = [key_strs[i] for i in valid_indices]
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.store.batch_put_from,
+                    valid_key_strs,
+                    buffer_ptrs,
+                    buffer_sizes,
+                ),
+                timeout=self.config.transfer_timeout,
+            )
+
+            for i, result in zip(valid_indices, results, strict=False):
+                if result != 0:
+                    logger.error(
+                        f"Failed to put key {key_strs[i]} using batch_put_from, "
+                        f"error code: {result}"
+                    )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timeout when batch putting keys from mooncake store. "
+                "Some data may not be saved."
+            )
+        except Exception as e:
+            logger.error(f"Failed to batch_put keys: {e}")
 
     @no_type_check
     async def list(self) -> List[str]:

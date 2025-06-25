@@ -167,25 +167,35 @@ class LMCacheEngine:
             num_stored_tokens = len(tokens)
         monitor_req_id = self.stats_monitor.on_store_request(num_stored_tokens)
 
+        # Step 1: Process tokens and collect all potential keys
+        token_chunks = list(self.token_database.process_tokens(tokens, mask))
+        all_keys = [key for _, _, key in token_chunks]
+
+        # Step 2: Batch check which keys already exist
+        existing_keys_mask = self.storage_manager.batch_contains(all_keys)
+
+        # Step 3: Filter out existing keys and prepare data for storage
         starts = []
         ends = []
         keys = []
         memory_objs = []
 
-        offload_time = 0.0
-        put_time = 0.0
-        tot_kv_size = 0
-        t = time.perf_counter()
-
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        for i, (start, end, key) in enumerate(token_chunks):
             assert isinstance(key, CacheEngineKey)
-            if self.storage_manager.contains(key):
+
+            if existing_keys_mask[i]:
+                logger.info(f"Key {key} already exists, skipping")
                 continue
-            # Allocate the memory object
+
+            # Allocate memory object for new key
             num_tokens = end - start
             kv_shape = self.gpu_connector.get_shape(num_tokens)
             kv_dtype = self.metadata.kv_dtype
             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+            
+            # print where the memory obj is
+            logger.info(f"Allocated memory obj for key {key} at {memory_obj}")
+
             if memory_obj is None:
                 logger.warning(
                     "Failed to allocate memory for the KV cache.\n"
@@ -198,21 +208,34 @@ class LMCacheEngine:
             keys.append(key)
             memory_objs.append(memory_obj)
 
-            tot_kv_size = memory_obj.get_size()
+        # Early return if no keys to store
+        if not keys:
+            logger.debug("No new keys to store")
+            self.stats_monitor.on_store_finished(monitor_req_id)
+            return
 
-        self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
-        offload_time += time.perf_counter() - t
+        # Step 4: Copy data from GPU to memory objects
+        offload_time = 0.0
+        put_time = 0.0
 
         t = time.perf_counter()
+        self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
+        offload_time = time.perf_counter() - t
+
+        # Step 5: Store memory objects to backend
+        t = time.perf_counter()
         self.storage_manager.batched_put(keys, memory_objs)
-        put_time += time.perf_counter() - t
+        put_time = time.perf_counter() - t
 
-        tot_time = offload_time + put_time
-
+        # Step 6: Update lookup server if available
         if self.lookup_server is not None:
-            self.lookup_server.batched_insert(key)
+            self.lookup_server.batched_insert(keys)
 
-        logger.debug(
+        # Step 7: Calculate metrics and log results
+        tot_time = offload_time + put_time
+        tot_kv_size = sum(memory_obj.get_size() for memory_obj in memory_objs)
+
+        logger.info(
             "Store %d tokens takes: %.4f ms, throughput: %.4f GB/s; "
             "offload_time: %.4f ms, put_time: %.4f ms",
             num_stored_tokens,

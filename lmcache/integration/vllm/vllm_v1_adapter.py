@@ -607,7 +607,6 @@ class LMCacheConnectorV1Impl:
 
             if skip_leading_tokens == len(token_ids):
                 continue  # skip this request
-            # Align to lmcache chunk size
             skip_leading_tokens = (
                 skip_leading_tokens
                 // self._lmcache_chunk_size

@@ -174,16 +174,10 @@ class StorageManager:
         # There's no way to configure a global caching policy
         # among different storage backends.
         if self.store:
-
-            async def _batched_put_async():
-                tasks = [
-                    self.store.put(key, obj)
-                    for key, obj in zip(keys, memory_objs, strict=False)
-                ]
-                await asyncio.gather(*tasks)
-
-            future = asyncio.run_coroutine_threadsafe(_batched_put_async(), self.loop)
-            future.result()
+            future = asyncio.run_coroutine_threadsafe(
+                self.store.batch_put(keys, memory_objs), self.loop
+            )
+            future.result()  # Wait for completion
 
         for memory_obj in memory_objs:
             memory_obj.ref_count_down()
@@ -287,6 +281,19 @@ class StorageManager:
             self.prefetch_tasks[key] = prefetch_task
             prefetch_task.add_done_callback(lambda_callback)
             self.manager_lock.release()
+            
+    def batch_contains(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[bool]:
+        """
+        Check whether the keys exist in the storage backend.
+
+        :param List[CacheEngineKey] keys: The keys to check.
+
+        :param Optional[List[str]] search_range: The range of storage backends
+        """
+        return self.store.batch_exists(keys)
 
     # TODO(Jiayi): Currently, search_range is only used for testing.
     def contains(
