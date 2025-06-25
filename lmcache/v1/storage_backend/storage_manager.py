@@ -13,7 +13,6 @@
 # limitations under the License.
 
 # Standard
-from collections import OrderedDict
 from concurrent.futures import Future
 from typing import (
     TYPE_CHECKING,
@@ -40,9 +39,8 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend import CreateStorageBackends
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.mooncakestore_connector import MooncakestoreConnector
 
 if TYPE_CHECKING:
     # First Party
@@ -69,25 +67,22 @@ class StorageManager:
         self.thread = threading.Thread(target=self.loop.run_forever)
         self.thread.start()
 
-        dst_device = "cuda"
-        # FIXME (Jiayi): The allocator is a dummy allocator in nixl for now.
-        # The real allocator is initialized inside the NixlBackend.
-        self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
-            CreateStorageBackends(
-                config,
-                metadata,
-                self.loop,
-                allocator,
-                dst_device,
-                lmcache_worker,
-                lookup_server,
-            )
+        self.allocator_backend = LocalCPUBackend(
+            config, allocator, lookup_server, lmcache_worker
         )
 
-        if config.enable_nixl:
-            self.allocator_backend = self.storage_backends["NixlBackend"]
-        else:
-            self.allocator_backend = self.storage_backends["LocalCPUBackend"]
+        self.store = MooncakestoreConnector(
+            "",
+            0,
+            "",
+            self.loop,
+            self.allocator_backend,
+            config,
+        )
+
+        # Set up metadata context for the store
+        self.store.metadata = metadata
+        self.store._setup_metadata_context()
 
         self.prefetch_tasks: Dict[CacheEngineKey, Future] = {}
 
@@ -153,13 +148,11 @@ class StorageManager:
         # This might not be ideal. We need a caching policy to
         # configure caching policies (e.g., write-through,
         # write-back, etc.)
-        for storage_backend in self.storage_backends.values():
-            if storage_backend.exists_in_put_tasks(key):
-                memory_obj.ref_count_down()
-                return
-
-        for backend_name, backend in self.storage_backends.items():
-            backend.submit_put_task(key, memory_obj)
+        if self.store:
+            future = asyncio.run_coroutine_threadsafe(
+                self.store.put(key, memory_obj), self.loop
+            )
+            future.result()  # Wait for completion
 
         memory_obj.ref_count_down()
 
@@ -180,10 +173,17 @@ class StorageManager:
         # backend if this backend does not have this cache.
         # There's no way to configure a global caching policy
         # among different storage backends.
-        for backend in self.storage_backends.values():
-            # NOTE: the handling of exists_in_put_tasks
-            # is done in the backend
-            backend.batched_submit_put_task(keys, memory_objs)
+        if self.store:
+
+            async def _batched_put_async():
+                tasks = [
+                    self.store.put(key, obj)
+                    for key, obj in zip(keys, memory_objs, strict=False)
+                ]
+                await asyncio.gather(*tasks)
+
+            future = asyncio.run_coroutine_threadsafe(_batched_put_async(), self.loop)
+            future.result()
 
         for memory_obj in memory_objs:
             memory_obj.ref_count_down()
@@ -192,35 +192,7 @@ class StorageManager:
         """
         Blocking function to get the memory object from the storages.
         """
-        # Search in prefetch task
-        self.manager_lock.acquire()
-        prefetch_task = self.prefetch_tasks.get(key, None)
-        self.manager_lock.release()
-
-        # Wait until prefetch task finishes
-        # Here, it is assumed all prefetch tasks load the memoryobj to
-        # hot cache (pinned cpu buffer)
-        if prefetch_task is not None:
-            logger.debug(
-                "Waiting for prefetching result. Optimally, this should not happen."
-            )
-            # Calling result() twice (already once in callback) will have
-            # no effect
-            # Tune the timeout for better performance
-            prefetch_task.result(timeout=1)
-
-        # Search all backends for blocking get
-        for backend_name, backend in self.storage_backends.items():
-            # NOTE(Jiayi): bypass the allocator for now
-            memory_obj = backend.get_blocking(key)
-            if memory_obj is not None:
-                if backend_name not in ["LocalCPUBackend", "NixlBackend"]:
-                    local_cpu_backend = self.storage_backends["LocalCPUBackend"]
-                    assert isinstance(local_cpu_backend, LocalCPUBackend)
-                    local_cpu_backend.write_back(key, memory_obj)
-                return memory_obj
-
-        return None
+        return self.store.get(key)
 
     def get_non_blocking(self, key: CacheEngineKey) -> Optional[Future]:
         """
@@ -229,13 +201,20 @@ class StorageManager:
         # TODO (Jiayi): incorporate prefetching here
 
         # Search all backends for non-blocking get
-        for backend_name, backend in self.storage_backends.items():
-            # NOTE(Jiayi): bypass the allocator for now
-            task = backend.get_non_blocking(key)
-            if task is not None:
-                # TODO (Jiayi): add write-back logic here
-                return task
+        if self.store:
+            return asyncio.run_coroutine_threadsafe(self.store.get(key), self.loop)
         return None
+
+    def batched_get(self, keys: List[CacheEngineKey]) -> List[Optional[MemoryObj]]:
+        """
+        Batched blocking function to get multiple memory objects from the storages.
+
+        :param List[CacheEngineKey] keys: The keys to retrieve.
+        :return: List of MemoryObj or None for each key.
+        """
+        if self.store:
+            return self.store.batch_get(keys)
+        return [None] * len(keys)
 
     def layerwise_batched_get(
         self,
@@ -268,58 +247,46 @@ class StorageManager:
         Update metadata after prefetch.
         """
         self.manager_lock.acquire()
-        prefetch_task = self.prefetch_tasks.pop(key)
         self.manager_lock.release()
         try:
-            buffer_memory_obj = prefetch_task.result()
+            memory_obj = future.result()
         except Exception as e:
             logger.error(f"Exception captured from future in prefetch_callback: {e}")
             raise e
-        kv_chunk = buffer_memory_obj.tensor
-        kv_shape = kv_chunk.shape
-        kv_dtype = kv_chunk.dtype
-        memory_obj = self.allocator_backend.allocate(kv_shape, kv_dtype)
+
         if memory_obj is None:
-            logger.warning("Memory allocation failed in prefetch_callback")
+            logger.warning("Prefetch returned None")
             return
 
-        assert memory_obj.tensor is not None, "Encounter invalid tensor"
-
-        # TODO(Jiayi): this part should be done in another process if
-        # the cpu->pinned cpu copy is blocking.
-        prefetch_stream = torch.cuda.Stream()
-        with torch.cuda.stream(prefetch_stream):
-            memory_obj.tensor.copy_(kv_chunk, non_blocking=True)
-        prefetch_stream.synchronize()
-
-        # NOTE: no need to ref_count_up here because
-        # the memory_obj's ref_count is already 1
+        # The object is already allocated and contains the data.
+        # We just need to put it into the hot cache.
         self.manager_lock.acquire()
-        self.storage_backends["LocalCPUBackend"].submit_put_task(key, memory_obj)
+        self.allocator_backend.submit_put_task(key, memory_obj)
         self.manager_lock.release()
 
     def prefetch(self, key: CacheEngineKey) -> None:
         """Launch a prefetch request in the storage backend. Non-blocking"""
-
-        if self.storage_backends["LocalCPUBackend"].contains(key):
+        # Check if already in hot cache
+        if self.allocator_backend.contains(key):
             return
+
         self.manager_lock.acquire()
         if key in self.prefetch_tasks:
             self.manager_lock.release()
             return
         self.manager_lock.release()
 
-        for backend in self.storage_backends.values():
-            prefetch_task = backend.submit_prefetch_task(key)
+        if self.store:
+            prefetch_task = self.get_non_blocking(key)
             if prefetch_task is None:
-                continue
+                return
+
             lambda_callback = lambda f: self.prefetch_callback(f, key)
 
             self.manager_lock.acquire()
             self.prefetch_tasks[key] = prefetch_task
             prefetch_task.add_done_callback(lambda_callback)
             self.manager_lock.release()
-            break
 
     # TODO(Jiayi): Currently, search_range is only used for testing.
     def contains(
@@ -342,15 +309,7 @@ class StorageManager:
 
         return: True if the key exists in the specified storage backends.
         """
-
-        for backend_name, backend in self.storage_backends.items():
-            if search_range is not None and backend_name not in search_range:
-                continue
-
-            if backend.contains(key, pin):
-                return True
-
-        return False
+        return self.store.exists(key)
 
     def remove(
         self,
@@ -373,12 +332,8 @@ class StorageManager:
         """
 
         num_removed = 0
-        for backend_name, backend in self.storage_backends.items():
-            # TODO(Jiayi): need to handle remove in non-cpu backends
-            if locations is None or "LocalCPUBackend" in locations:
-                assert hasattr(backend, "remove")
-                num_removed += backend.remove(key)
-
+        if self.allocator_backend:
+            num_removed += self.allocator_backend.remove(key)
         return num_removed
 
     def batched_unpin(
@@ -396,10 +351,9 @@ class StorageManager:
         Should be a subset of ["LocalCPUBackend", "LocalDiskBackend"] for now.
         If None, perform `unpin` in all backends.
         """
-        for backend_name, backend in self.storage_backends.items():
-            if locations is None or backend_name in locations:
-                for key in keys:
-                    backend.unpin(key)
+        if self.allocator_backend:
+            for key in keys:
+                self.allocator_backend.unpin(key)
 
     def clear(
         self,
@@ -418,22 +372,15 @@ class StorageManager:
         """
 
         num_cleared = 0
-        for backend_name, backend in self.storage_backends.items():
-            # TODO(Jiayi): need to handle remove in non-cpu backends
-            if locations is None or backend_name in locations:
-                if hasattr(backend, "clear"):
-                    num_cleared += backend.clear()
-                else:
-                    logger.warning(
-                        f"Storage backend {backend_name} does not support "
-                        "clear operation. Skipping."
-                    )
-
+        if self.allocator_backend:
+            num_cleared += self.allocator_backend.clear()
         return num_cleared
 
     def close(self):
-        for backend in self.storage_backends.values():
-            backend.close()
+        if self.store:
+            self.store.close()
+        if self.allocator_backend:
+            self.allocator_backend.close()
 
         # using threadsafe method here as stop modifies
         # the internal state of the loop (in another thread)

@@ -15,6 +15,7 @@
 # Standard
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
+import time
 
 # Third Party
 from vllm.config import VllmConfig
@@ -445,6 +446,7 @@ class LMCacheConnectorV1Impl:
             The number of elements in kv_caches and layer_names should be
             the same.
         """
+        start_time = time.time()
         self.current_layer = 0
         if len(self.kv_caches) == 0:
             self._init_kv_caches_from_forward_context(forward_context)
@@ -462,6 +464,8 @@ class LMCacheConnectorV1Impl:
 
         assert self.lmcache_engine is not None
 
+        # Collect all requests that need loading for batch processing
+        batch_requests = []
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
                 continue
@@ -481,6 +485,21 @@ class LMCacheConnectorV1Impl:
             if self.skip_last_n_tokens > 0:
                 tokens = tokens[: -self.skip_last_n_tokens]
                 token_mask = token_mask[: -self.skip_last_n_tokens]
+
+            batch_requests.append(
+                {
+                    "request": request,
+                    "tokens": tokens,
+                    "token_mask": token_mask,
+                    "slot_mapping": slot_mapping,
+                }
+            )
+
+        for batch_req in batch_requests:
+            request = batch_req["request"]
+            tokens = batch_req["tokens"]
+            token_mask = batch_req["token_mask"]
+            slot_mapping = batch_req["slot_mapping"]
 
             ret_token_mask = self.lmcache_engine.retrieve(
                 tokens,
@@ -506,6 +525,12 @@ class LMCacheConnectorV1Impl:
                     num_retrieved_tokens,
                     num_expected_tokens,
                 )
+
+        end_time = time.time()
+        # only print > 5ms
+        if end_time - start_time > 0.005:
+            # print ms
+            logger.info("Load kv time: %.4f ms", (end_time - start_time) * 1000)
 
     @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -546,6 +571,7 @@ class LMCacheConnectorV1Impl:
             # Don't do save if the role is kv_consumer
             return
 
+        start_time = time.time()
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
@@ -606,6 +632,12 @@ class LMCacheConnectorV1Impl:
                 slot_mapping=slot_mapping,
                 offset=skip_leading_tokens,
             )
+
+        end_time = time.time()
+        # only print > 5ms
+        if end_time - start_time > 0.005:
+            # print ms
+            logger.info("Save kv time: %.4f ms", (end_time - start_time) * 1000)
 
     def get_finished(
         self, finished_req_ids: set[str]

@@ -262,45 +262,44 @@ class LMCacheEngine:
         monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
+
+        # Collect all keys first for batch processing
+        chunk_infos = []  # List of (start, end, key)
+        keys_to_retrieve = []
+
         for start, end, key in self.token_database.process_tokens(tokens, mask):
             assert isinstance(key, CacheEngineKey)
+            chunk_infos.append((start, end, key))
+            keys_to_retrieve.append(key)
 
-            # Get the memory object from the storage backend
-            memory_obj = self.storage_manager.get(key)
+        if not keys_to_retrieve:
+            # No chunks to process
+            self.stats_monitor.on_retrieve_finished(monitor_req_id, 0)
+            return ret_mask
 
+        # Batch retrieve all memory objects
+        batch_get_start_time = time.perf_counter()
+        memory_objs = self.storage_manager.batched_get(keys_to_retrieve)
+        batch_get_end_time = time.perf_counter()
+
+        gpu_transfer_start_time = time.perf_counter()
+        for i, ((start, end, key), memory_obj) in enumerate(
+            zip(chunk_infos, memory_objs, strict=False)
+        ):
             if memory_obj is None:
-                if self.enable_p2p:
-                    future_memory_obj = asyncio.run_coroutine_threadsafe(
-                        self.distributed_server.issue_get(key),
-                        self.distributed_loop,
-                    )
-                    memory_obj = future_memory_obj.result()
-                if memory_obj is None:
-                    break
+                # Stop processing if we hit a missing chunk (prefix matching)
+                break
 
             ret_mask[start:end] = True
-
-            # NOTE(Jiayi): memory_obj doesn't have to be a pinned
-            # cpu tensor for the sake of performance.
-            # For example, disk->gpu is faster than disk->cpu->gpu.
-            # RDMA is another example.
             self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
             memory_obj.ref_count_down()
-
-            # NOTE (ApostaC): This is only for the current implementation:
-            # When the object is retrieved back to vLLM, the storage backend
-            # will immediately remove the object from itself
-            if self.remove_after_retrieve:
-                self.storage_manager.remove(key)
-            else:
-                self.storage_manager.batched_unpin([key])
-
-        retrieved_tokens = torch.sum(ret_mask)
-        self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.debug(
-            f"Retrieved {retrieved_tokens} "
-            f"out of {num_required_tokens} "
-            f"out of total {len(tokens)} tokens"
+        gpu_transfer_end_time = time.perf_counter()
+        # print cost ms level
+        logger.info(
+            "Batch get %d KV cache takes: %.4f ms; GPU transfer takes: %.4f ms",
+            len(keys_to_retrieve),
+            (batch_get_end_time - batch_get_start_time) * 1000,
+            (gpu_transfer_end_time - gpu_transfer_start_time) * 1000,
         )
         return ret_mask
 
@@ -313,8 +312,14 @@ class LMCacheEngine:
         """Launch the prefetching process in the storage manager to load the
         KV to the local CPU memory
         """
+        # Collect all keys for batch prefetching
+        keys_to_prefetch = []
         for start, end, key in self.token_database.process_tokens(tokens, mask):
             assert isinstance(key, CacheEngineKey)
+            keys_to_prefetch.append(key)
+
+        # Batch prefetch all keys
+        for key in keys_to_prefetch:
             self.storage_manager.prefetch(key)
 
     # TODO(Jiayi): Currently, search_range is only used for testing.
