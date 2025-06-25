@@ -283,6 +283,12 @@ class LMCacheEngine:
         batch_get_end_time = time.perf_counter()
 
         gpu_transfer_start_time = time.perf_counter()
+
+        # Collect valid memory objects and their corresponding info for batch processing
+        valid_memory_objs = []
+        valid_starts = []
+        valid_ends = []
+
         for i, ((start, end, key), memory_obj) in enumerate(
             zip(chunk_infos, memory_objs, strict=False)
         ):
@@ -291,8 +297,28 @@ class LMCacheEngine:
                 break
 
             ret_mask[start:end] = True
-            self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
-            memory_obj.ref_count_down()
+            valid_memory_objs.append(memory_obj)
+            valid_starts.append(start)
+            valid_ends.append(end)
+
+        # Use batched GPU transfer if available and we have valid objects
+        if valid_memory_objs:
+            try:
+                # Try to use batched transfer
+                self.gpu_connector.batched_to_gpu(
+                    valid_memory_objs, valid_starts, valid_ends, **kwargs
+                )
+            except (NotImplementedError, AttributeError):
+                # Fall back to individual transfers if batched is not implemented
+                for memory_obj, start, end in zip(
+                    valid_memory_objs, valid_starts, valid_ends, strict=False
+                ):
+                    self.gpu_connector.to_gpu(memory_obj, start, end, **kwargs)
+
+            # Decrease reference count for all memory objects
+            for memory_obj in valid_memory_objs:
+                memory_obj.ref_count_down()
+
         gpu_transfer_end_time = time.perf_counter()
         # print cost ms level
         logger.info(
