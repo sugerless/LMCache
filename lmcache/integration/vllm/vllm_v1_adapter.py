@@ -524,6 +524,8 @@ class LMCacheConnectorV1Impl:
                 token_mask = token_mask[: -self.skip_last_n_tokens]
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
+            vllm_cached_tokens = request.load_spec.vllm_cached_tokens
+            total_cached_tokens = lmcache_cached_tokens + vllm_cached_tokens
             if self.use_layerwise:
                 if idx == last_idx:
                     sync = True
@@ -531,19 +533,20 @@ class LMCacheConnectorV1Impl:
                     sync = False
                 # NOTE(Jiayi): Perform blending before layerwise prefix caching
                 if self.enable_blending:
+                    # TODO(Jiayi): Need to make prefix caching and blending compatible
+                    assert total_cached_tokens == lmcache_cached_tokens
                     self.blender.blend(
-                        tokens[: request.load_spec.lmcache_cached_tokens],
-                        token_mask[: request.load_spec.lmcache_cached_tokens],
+                        tokens[:lmcache_cached_tokens],
+                        token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping,
                     )
                 else:
-                    # TODO(Jiayi): Need to make prefix caching and blending compatible
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
+                        tokens[:total_cached_tokens],
+                        token_mask[:total_cached_tokens],
                         kvcaches=kvcaches,
-                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        slot_mapping=slot_mapping[:total_cached_tokens],
                         sync=sync,
                     )
                     # NOTE: retrieve for two layers at the first layer
@@ -552,18 +555,16 @@ class LMCacheConnectorV1Impl:
                     self.layerwise_retrievers.append(layerwise_retriever)
             else:
                 ret_token_mask = self.lmcache_engine.retrieve(
-                    tokens[:lmcache_cached_tokens],
-                    token_mask[:lmcache_cached_tokens],
+                    tokens[:total_cached_tokens],
+                    token_mask[:total_cached_tokens],
                     kvcaches=kvcaches,
-                    slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    slot_mapping=slot_mapping[:total_cached_tokens],
                 )
 
                 # Check the result
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 num_expected_tokens = (
-                    request.load_spec.lmcache_cached_tokens
-                    - request.load_spec.vllm_cached_tokens
-                    - self.skip_last_n_tokens
+                    request.load_spec.lmcache_cached_tokens - self.skip_last_n_tokens
                 )
                 if num_retrieved_tokens < num_expected_tokens:
                     logger.error(
