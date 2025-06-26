@@ -174,15 +174,16 @@ class MooncakestoreConnector(RemoteConnector):
             logger.error(f"Failed to get key {key_str}. {e}")
 
         if buffer is None:
+            logger.info(f'blankdebug mooncakestore buffer is None')
             return None
 
         retrieved_view = memoryview(buffer)
         metadata_bytes = retrieved_view[:METADATA_BYTES_LEN]
         if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
+            logger.info(f'blankdebug mooncakestore metadata_bytes != None, metadata_bytes {len(metadata_bytes)}')
             return None
 
         metadata = RemoteMetadata.deserialize(metadata_bytes)
-
         memory_obj = self.local_cpu_backend.allocate(
             metadata.shape,
             metadata.dtype,
@@ -207,7 +208,9 @@ class MooncakestoreConnector(RemoteConnector):
             memory_obj.tensor.copy_(temp_tensor)
             return memory_obj
         else:
-            return None
+            internal_buffer = memory_obj.byte_array
+            internal_buffer[:] = retrieved_view[METADATA_BYTES_LEN:]
+            return memory_obj
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         # Please use a function like `memory_obj.to_meta()`.
