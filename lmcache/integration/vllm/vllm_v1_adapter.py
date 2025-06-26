@@ -561,7 +561,9 @@ class LMCacheConnectorV1Impl:
 
                 # Check the result
                 num_retrieved_tokens = ret_token_mask.sum().item()
-                num_expected_tokens = lmcache_cached_tokens - self.skip_last_n_tokens
+                num_expected_tokens = (
+                    lmcache_cached_tokens - request.load_spec.vllm_cached_tokens
+                )
                 if num_retrieved_tokens < num_expected_tokens:
                     logger.error(
                         "The number of retrieved tokens is less than the "
