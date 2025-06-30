@@ -28,6 +28,18 @@ class RemoteConnector(metaclass=abc.ABCMeta):
     """
     Interface for remote connector
     """
+    @abc.abstractmethod
+    async def batched_exists(self, keys: List[CacheEngineKey]) -> List[bool]:
+        """
+        Check if the remote server contains the keys
+
+        Input:
+            keys: a list of key
+
+        Returns:
+            True if the cache engine contains the key, False otherwise
+        """
+        raise NotImplementedError
 
     @abc.abstractmethod
     async def exists(self, key: CacheEngineKey) -> bool:
@@ -51,6 +63,21 @@ class RemoteConnector(metaclass=abc.ABCMeta):
             key: the key of the corresponding object
 
         Returns:
+            The memory_obj of the corresponding key
+            Return None if the key does not exist
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def batched_get(self, keys: List[CacheEngineKey]) -> List[MemoryObj]:
+        """
+        Get the memory_obj of the corresponding key
+
+        Input:
+            List[CacheEngineKey] keys: The keys of the MemoryObjs.
+
+        Returns:
+            
             The memory_obj of the corresponding key
             Return None if the key does not exist
         """

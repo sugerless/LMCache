@@ -30,6 +30,9 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 import torch
 import vllm.envs as envs
 import zmq
+from functools import wraps
+import time
+
 
 # First Party
 from lmcache.integration.vllm.utils import (
@@ -465,7 +468,21 @@ class LMCacheConnectorV1Impl:
     # Worker side APIs
     ####################
 
+    @staticmethod
+    def _timing_wrapper(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            start = time.time()
+            result = func(self, *args, **kwargs)
+            end = time.time()
+            duration_ms = (end - start) * 1000
+            logger.info(f"[Timing] {func.__name__} took {duration_ms:.2f} ms")
+            return result
+
+        return wrapper
+
     @_lmcache_nvtx_annotate
+    @_timing_wrapper
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
@@ -786,6 +803,7 @@ class LMCacheConnectorV1Impl:
     ####################
 
     @_lmcache_nvtx_annotate
+    @_timing_wrapper
     def get_num_new_matched_tokens(
         self,
         request: "Request",

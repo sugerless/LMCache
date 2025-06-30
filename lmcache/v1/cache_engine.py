@@ -386,49 +386,69 @@ class LMCacheEngine:
         reordered_memory_objs = []
         reordered_starts = []
         reordered_ends = []
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
-            assert isinstance(key, CacheEngineKey)
-
-            if key in self.lookup_cache:
-                # TODO(Jiayi): we can reduce the number of `contains` calls
-                # by checking the lookup cache first (should be updated in `lookup`)
-                pass
-            else:
-                # NOTE: key should always be in the lookup cache once
-                # we support it.
-                location = self.storage_manager.contains(key)
-                if location is None:
-                    # TODO(Jiayi): Need to refactor P2P as a storage backend to
-                    # clean up the following code.
-                    if self.enable_p2p:
-                        future_memory_obj = asyncio.run_coroutine_threadsafe(
-                            self.distributed_server.issue_get(key),
-                            self.distributed_loop,
-                        )
-                        memory_obj = future_memory_obj.result()
-                        reordered_keys.append(key)
-                        reordered_memory_objs.append(memory_obj)
-                        reordered_starts.append(start)
-                        reordered_ends.append(end)
-                        continue
-                    break
-
-                # NOTE: Here we make the assumption that the underlying
-                # storage backend support pin operation, and the memory
-                # object is already pinned in the storage backend.
+        token_ranges = list(self.token_database.process_tokens(tokens))
+        keys = [key for _, _, key in token_ranges]
+        range_infos = token_ranges
+        hits = self.storage_manager.batched_contains(keys, ["RemoteBackend"])
+        assert len(hits) == len(keys)
+        for i, (start, end, key) in enumerate(range_infos):
+            if hits[i]:
                 ret_mask[start:end] = True
-
+                location = "RemoteBackend"
                 if location not in key_mapping:
                     key_mapping[location] = [key]
                     start_mapping[location] = [start]
                     end_mapping[location] = [end]
                     continue
 
-            assert location is not None
+                key_mapping[location].append(key)
+                start_mapping[location].append(start)
+                end_mapping[location].append(end)
+        logger.info(f'blankdebug retrieve hits: {hits}, keys: {keys}')
 
-            key_mapping[location].append(key)
-            start_mapping[location].append(start)
-            end_mapping[location].append(end)
+        # for start, end, key in self.token_database.process_tokens(tokens, mask):
+        #     assert isinstance(key, CacheEngineKey)
+
+        #     if key in self.lookup_cache:
+        #         # TODO(Jiayi): we can reduce the number of `contains` calls
+        #         # by checking the lookup cache first (should be updated in `lookup`)
+        #         pass
+        #     else:
+        #         # NOTE: key should always be in the lookup cache once
+        #         # we support it.
+        #         location = self.storage_manager.contains(key)
+        #         if location is None:
+        #             # TODO(Jiayi): Need to refactor P2P as a storage backend to
+        #             # clean up the following code.
+        #             if self.enable_p2p:
+        #                 future_memory_obj = asyncio.run_coroutine_threadsafe(
+        #                     self.distributed_server.issue_get(key),
+        #                     self.distributed_loop,
+        #                 )
+        #                 memory_obj = future_memory_obj.result()
+        #                 reordered_keys.append(key)
+        #                 reordered_memory_objs.append(memory_obj)
+        #                 reordered_starts.append(start)
+        #                 reordered_ends.append(end)
+        #                 continue
+        #             break
+
+        #         # NOTE: Here we make the assumption that the underlying
+        #         # storage backend support pin operation, and the memory
+        #         # object is already pinned in the storage backend.
+        #         ret_mask[start:end] = True
+
+        #         if location not in key_mapping:
+        #             key_mapping[location] = [key]
+        #             start_mapping[location] = [start]
+        #             end_mapping[location] = [end]
+        #             continue
+
+        #     assert location is not None
+
+        #     key_mapping[location].append(key)
+        #     start_mapping[location].append(start)
+        #     end_mapping[location].append(end)
 
         # TODO(Jiayi): We can parallelize the retrieval from
         # different storage backends.
@@ -464,7 +484,7 @@ class LMCacheEngine:
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
-        logger.debug(
+        logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"
@@ -624,35 +644,49 @@ class LMCacheEngine:
 
         # secondary lookup on p2p (via lookup_server) if enabled
         search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
-        for start, end, key in self.token_database.process_tokens(tokens):
-            assert isinstance(key, CacheEngineKey)
-
-            if self.use_layerwise:
-                # TODO(Jiayi): Optimize by checking only the existence of the key
-                # of one layer
-                key_all_layers = key.split_layers(self.num_layers)
-                for key_single_layer in key_all_layers:
-                    if not self.storage_manager.contains(
-                        key_single_layer, search_range, pin
-                    ):
-                        if search_p2p and self.lookup_server.lookup(key_single_layer):
-                            continue
-                        return old_end
+        # blankdebug hack
+        token_ranges = list(self.token_database.process_tokens(tokens))
+        keys = [key for _, _, key in token_ranges]
+        range_infos = token_ranges
+        hits = self.storage_manager.batched_contains(keys, ["RemoteBackend"], pin)
+        logger.info(f'blankdebug lookup hits: {hits}, keys: {keys}')
+        assert len(hits) == len(keys)
+        for i, (start, end, key) in enumerate(range_infos):
+            if hits[i]:
                 old_end = end
-            else:
-                if self.storage_manager.contains(key, search_range, pin):
-                    old_end = end
-                    continue
-
-                if search_p2p:
-                    assert self.lookup_server is not None
-                    if self.lookup_server.lookup(key):
-                        old_end = end
-                        continue
-                return old_end
-
-        # all tokens where found, return the maximal end
+                continue
+            return old_end
         return end
+
+        # for start, end, key in self.token_database.process_tokens(tokens):
+        #     assert isinstance(key, CacheEngineKey)
+
+        #     if self.use_layerwise:
+        #         # TODO(Jiayi): Optimize by checking only the existence of the key
+        #         # of one layer
+        #         key_all_layers = key.split_layers(self.num_layers)
+        #         for key_single_layer in key_all_layers:
+        #             if not self.storage_manager.contains(
+        #                 key_single_layer, search_range, pin
+        #             ):
+        #                 if search_p2p and self.lookup_server.lookup(key_single_layer):
+        #                     continue
+        #                 return old_end
+        #         old_end = end
+        #     else:
+        #         if self.storage_manager.contains(key, search_range, pin):
+        #             old_end = end
+        #             continue
+
+        #         if search_p2p:
+        #             assert self.lookup_server is not None
+        #             if self.lookup_server.lookup(key):
+        #                 old_end = end
+        #                 continue
+        #         return old_end
+
+        # # all tokens where found, return the maximal end
+        # return end
 
     @_lmcache_nvtx_annotate
     def clear(

@@ -368,7 +368,34 @@ class StorageManager:
                 return backend_name
 
         return None
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        search_range: Optional[List[str]] = None,
+        pin: bool = False,
+    ) -> List[bool]:
+        """
+        Check whether the key exists in the storage backend.
 
+        :param CacheEngineKey key: The key to check.
+
+        :param Optional[List[str]] search_range: The range of storage backends
+        to search in. Should be a subset of ["LocalCPUBackend",
+        "LocalDiskBackend"] for now.
+        If None, search in all backends.
+
+        :param bool pin: Whether to pin the key.
+
+        return: True if the key exists in the specified storage backends.
+        """
+        res = []
+        for backend_name, backend in self.storage_backends.items():
+            if search_range is not None and backend_name not in search_range:
+                continue
+            # blankdebug hack code
+            return backend.batched_contains(keys, pin)
+
+        return res
     def remove(
         self,
         key: CacheEngineKey,

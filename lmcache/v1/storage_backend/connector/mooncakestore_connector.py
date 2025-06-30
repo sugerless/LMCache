@@ -156,6 +156,68 @@ class MooncakestoreConnector(RemoteConnector):
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())
 
+    async def batched_exists(self, keys: List[CacheEngineKey]) -> List[bool]:
+        return self.store.batch_is_exist([key.to_string() for key in keys])
+
+    async def batched_get(self, keys: List[CacheEngineKey]) -> List[MemoryObj]:
+        keys_str = [key.to_string() for key in keys]
+
+        try:
+            list_buffer = await asyncio.wait_for(
+                asyncio.to_thread(self.store.get_batch, keys_str),
+                timeout=self.config.transfer_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Timeout when getting key {keys_str} from mooncake store."
+                "The output may be incorrect."
+            )
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get key {keys_str}. {e}")
+
+        if list_buffer is None or len(list_buffer) == 0:
+            logger.info(f'blankdebug mooncakestore buffers is None')
+            return None
+        res = []
+        for buffer in list_buffer:
+            retrieved_view = memoryview(buffer)
+            metadata_bytes = retrieved_view[:METADATA_BYTES_LEN]
+            if metadata_bytes is None or len(metadata_bytes) != METADATA_BYTES_LEN:
+                logger.info(f'blankdebug mooncakestore metadata_bytes != None, metadata_bytes {len(metadata_bytes)}')
+                res.append(None)
+
+            metadata = RemoteMetadata.deserialize(metadata_bytes)
+            memory_obj = self.local_cpu_backend.allocate(
+                metadata.shape,
+                metadata.dtype,
+                metadata.fmt,
+            )
+            assert len(retrieved_view) == metadata.length + METADATA_BYTES_LEN
+
+            if memory_obj is None:
+                logger.warning("Failed to allocate memory during remote receive")
+                res.append(None)
+
+            if memory_obj.tensor is not None:
+                assert metadata.dtype is not None
+                num_elements = reduce(operator.mul, metadata.shape)
+                temp_tensor = torch.frombuffer(
+                    buffer,
+                    dtype=metadata.dtype,
+                    offset=METADATA_BYTES_LEN,
+                    count=num_elements,
+                ).reshape(metadata.shape)
+
+                memory_obj.tensor.copy_(temp_tensor)
+                res.append(memory_obj)
+            else:
+                internal_buffer = memory_obj.byte_array
+                internal_buffer[:] = retrieved_view[METADATA_BYTES_LEN:]
+                res.append(memory_obj)
+        logger.info(f'blankdebug mooncakestore buffers is finish, res len: {len(res)}')
+        return res
+
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
 

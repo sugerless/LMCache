@@ -73,6 +73,12 @@ class InstrumentedRemoteConnector(RemoteConnector):
 
     async def list(self) -> List[str]:
         return await self._connector.list()
+    
+    async def batched_exists(self, keys: List[CacheEngineKey]) -> List[bool]:
+        return await self._connector.batched_exists(keys)
+
+    async def batched_get(self, keys: List[CacheEngineKey]) -> List[MemoryObj]:
+        return await self._connector.batched_get(keys)
 
     async def close(self) -> None:
         await self._connector.close()
