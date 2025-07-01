@@ -37,6 +37,7 @@ from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import lmcache_get_config
 from lmcache.integration.vllm.vllm_adapter import (
     get_kv_cache_torch_dtype,
+    apply_mm_hashes_to_token_ids,
     init_lmcache_engine,
 )
 from lmcache.logging import init_logger
