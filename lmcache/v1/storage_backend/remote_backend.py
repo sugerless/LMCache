@@ -290,51 +290,52 @@ class RemoteBackend(StorageBackendInterface):
         )
         return decompressed_memory_obj
 
-    @_lmcache_nvtx_annotate
-    def batched_get_blocking(self, keys: List[CacheEngineKey]) -> List[MemoryObj]:
-        """
-        Blocking get function.
-        """
-        res = []
-        logger.info(f'blankdebug batched_get_blocking start')
-        if self.connection is None:
-            logger.warning("Connection is None in batch_get_blocking, returning None")
-            return res
-        # For MLA worker id as 0 mode, use worker_id 0
-        if self._mla_worker_id_as0_mode:
-            keys = [CacheEngineKey(
-                key.fmt, key.model_name, key.world_size, 0, key.chunk_hash
-            ) for key in keys]
-        t1 = time.perf_counter()
-        future = asyncio.run_coroutine_threadsafe(self.connection.batched_get(keys), self.loop)
+    # @_lmcache_nvtx_annotate
+    # def batched_get_blocking(self, keys: List[CacheEngineKey]) -> List[MemoryObj]:
+    #     """
+    #     Blocking get function.
+    #     """
+    #     res = []
+    #     logger.info(f'blankdebug batched_get_blocking start')
+    #     if self.connection is None:
+    #         logger.warning("Connection is None in batch_get_blocking, returning None")
+    #         return res
+    #     # For MLA worker id as 0 mode, use worker_id 0
+    #     if self._mla_worker_id_as0_mode:
+    #         keys = [CacheEngineKey(
+    #             key.fmt, key.model_name, key.world_size, 0, key.chunk_hash
+    #         ) for key in keys]
+    #     t1 = time.perf_counter()
+    #     future = asyncio.run_coroutine_threadsafe(self.connection.batched_get(keys), self.loop)
 
-        try:
-            memory_objs = future.result(self.blocking_timeout_secs)
-        except Exception as e:
-            if isinstance(e, TimeoutError):
-                logger.info("get blocking timeout, trigger cancel the future task")
-                future.cancel()
-            with self.lock:
-                self.connection = None
-                self.failure_time = time.time()
-            logger.info(f"Error occurred in batch_get_blocking: {e}")
-            logger.info("Returning None")
-            return res
+    #     try:
+    #         memory_objs = future.result(self.blocking_timeout_secs)
+    #     except Exception as e:
+    #         if isinstance(e, TimeoutError):
+    #             logger.info("get blocking timeout, trigger cancel the future task")
+    #             future.cancel()
+    #         with self.lock:
+    #             self.connection = None
+    #             self.failure_time = time.time()
+    #         logger.info(f"Error occurred in batch_get_blocking: {e}")
+    #         logger.info("Returning None")
+    #         return res
 
-        t2 = time.perf_counter()
-        self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
-        if memory_objs is None or len(memory_objs) == 0:
-            logger.error(f'blankdebug batch_get_blocking error, memory obj is None, key: {keys}')
-            return None
-        res = [self.deserializer.deserialize(memory_obj) for memory_obj in memory_objs]
-        t3 = time.perf_counter()
-        logger.info(
-            f"batch_get_blocking Get takes {(t2 - t1) * 1000:.6f} msec, "
-            f"batch_get_blocking deserialization takes {(t3 - t2) * 1000:.6f} msec"
-            f"batch_get_blocking token len {len(res)}"
-        )
-        return res
+    #     t2 = time.perf_counter()
+    #     self.stats_monitor.update_interval_remote_time_to_get_sync((t2 - t1) * 1000)
+    #     if memory_objs is None or len(memory_objs) == 0:
+    #         logger.error(f'blankdebug batch_get_blocking error, memory obj is None, key: {keys}')
+    #         return None
+    #     res = [self.deserializer.deserialize(memory_obj) for memory_obj in memory_objs]
+    #     t3 = time.perf_counter()
+    #     logger.info(
+    #         f"batch_get_blocking Get takes {(t2 - t1) * 1000:.6f} msec, "
+    #         f"batch_get_blocking deserialization takes {(t3 - t2) * 1000:.6f} msec"
+    #         f"batch_get_blocking token len {len(res)}"
+    #     )
+    #     return res
 
+    
     def get_non_blocking(
         self,
         key: CacheEngineKey,

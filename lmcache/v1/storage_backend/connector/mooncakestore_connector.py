@@ -161,7 +161,7 @@ class MooncakestoreConnector(RemoteConnector):
 
     async def batched_get(self, keys: List[CacheEngineKey]) -> List[MemoryObj]:
         keys_str = [key.to_string() for key in keys]
-
+        res = []
         try:
             list_buffer = await asyncio.wait_for(
                 asyncio.to_thread(self.store.get_batch, keys_str),
@@ -172,14 +172,14 @@ class MooncakestoreConnector(RemoteConnector):
                 f"Timeout when getting key {keys_str} from mooncake store."
                 "The output may be incorrect."
             )
-            return None
+            return res
         except Exception as e:
             logger.error(f"Failed to get key {keys_str}. {e}")
 
-        if list_buffer is None or len(list_buffer) == 0:
-            logger.info(f'blankdebug mooncakestore buffers is None')
-            return None
-        res = []
+        if list_buffer is None or len(list_buffer) == 0 or (len(list_buffer) == 1 and len(list_buffer[0]) == 0):
+            logger.error(f'Mooncake store returned an empty byte, likely indicating a failure for keys: {keys_str}')
+            return res
+
         for buffer in list_buffer:
             retrieved_view = memoryview(buffer)
             metadata_bytes = retrieved_view[:METADATA_BYTES_LEN]

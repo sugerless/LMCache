@@ -187,9 +187,15 @@ class LMCacheEngine:
         tot_kv_size = 0
         t = time.perf_counter()
 
-        for start, end, key in self.token_database.process_tokens(tokens, mask):
+        token_ranges = list(self.token_database.process_tokens(tokens, mask))
+        keys = [key for _, _, key in token_ranges]
+        range_infos = token_ranges
+        hits = self.storage_manager.batched_contains(keys, ["RemoteBackend"])
+        assert len(hits) == len(keys)
+
+        for i, (start, end, key) in enumerate(range_infos):            
             assert isinstance(key, CacheEngineKey)
-            if self.storage_manager.contains(key, ['LocalCPUBackend']):
+            if hits[i] == 1:
                 continue
             # Allocate the memory object
             num_tokens = end - start
@@ -392,7 +398,7 @@ class LMCacheEngine:
         hits = self.storage_manager.batched_contains(keys, ["RemoteBackend"])
         assert len(hits) == len(keys)
         for i, (start, end, key) in enumerate(range_infos):
-            if hits[i]:
+            if hits[i] == 1:
                 ret_mask[start:end] = True
                 location = "RemoteBackend"
                 if location not in key_mapping:
@@ -404,7 +410,6 @@ class LMCacheEngine:
                 key_mapping[location].append(key)
                 start_mapping[location].append(start)
                 end_mapping[location].append(end)
-        logger.info(f'blankdebug retrieve hits: {hits}, keys: {keys}')
 
         # for start, end, key in self.token_database.process_tokens(tokens, mask):
         #     assert isinstance(key, CacheEngineKey)
@@ -652,7 +657,7 @@ class LMCacheEngine:
         logger.info(f'blankdebug lookup hits: {hits}, keys: {keys}')
         assert len(hits) == len(keys)
         for i, (start, end, key) in enumerate(range_infos):
-            if hits[i]:
+            if hits[i] == 1:
                 old_end = end
                 continue
             return old_end
