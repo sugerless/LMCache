@@ -87,6 +87,26 @@ class GPUConnectorInterface(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def batched_to_gpu(
+        self,
+        memory_objs: List[MemoryObj],
+        starts: List[int],
+        ends: List[int],
+        **kwargs,
+    ):
+        """
+        Batched store the data from memory objects into GPU memory.
+        Sub-classes should define the format of the kwargs.
+
+        :param List[MemoryObj] memory_objs: The memory objects to be copied into GPU.
+        :param List[int] starts: The starting indices of the data in the corresponding
+            token sequence.
+        :param List[int] ends: The ending indices of the data in the corresponding
+            token sequence.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def get_shape(self, num_tokens: int) -> torch.Size:
         """Get the shape of the data given the number of tokens."""
         raise NotImplementedError
@@ -191,6 +211,11 @@ class VLLMNestedTupleGPUConnector(GPUConnectorInterface):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.from_gpu(memory_obj, start, end, **kwargs)
 
+    # TODO(Jiayi): need to optimize
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            self.to_gpu(memory_obj, start, end, **kwargs)
+
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
 
@@ -287,6 +312,11 @@ class VLLMPagedMemGPUConnector(GPUConnectorInterface):
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.from_gpu(memory_obj, start, end, **kwargs)
+
+    # TODO(Jiayi): need to optimize
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            self.to_gpu(memory_obj, start, end, **kwargs)
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         return torch.Size([2, self.num_layers, num_tokens, self.hidden_dim_size])
@@ -487,6 +517,61 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             self.from_gpu(memory_obj, start, end, **kwargs)
 
+    @_lmcache_nvtx_annotate
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        """
+        Batched store the data from memory objects into GPU memory.
+        This implementation provides real batching by combining all slot mappings
+        and performing a single multi-layer transfer operation.
+
+        :param List[MemoryObj] memory_objs: The memory objects to be copied into GPU.
+        :param List[int] starts: The starting indices of the data in the corresponding
+            token sequence.
+        :param List[int] ends: The ending indices of the data in the corresponding
+            token sequence.
+        """
+        if not memory_objs:
+            return
+
+        if "kvcaches" not in kwargs:
+            raise ValueError("'kvcaches' should be provided in kwargs.")
+
+        if "slot_mapping" not in kwargs:
+            raise ValueError("'slot_mapping' should be provided in kwargs.")
+
+        kvcaches: List[torch.Tensor] = kwargs["kvcaches"]
+        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+
+        # Validate memory objects format
+        for memory_obj in memory_objs:
+            assert memory_obj.tensor is not None
+            if self.use_mla:
+                if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
+                    raise ValueError(
+                        "The memory object should be in KV_MLA_FMT format in"
+                        " order to be processed by VLLMPagedMemGPUConnector"
+                    )
+            else:
+                if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
+                    raise ValueError(
+                        "The memory object should be in KV_2LTD format in"
+                        " order to be processed by VLLMPagedMemGPUConnector"
+                    )
+
+        kv_cache_pointers = self._initialize_pointers(kvcaches)
+
+        # Perform batched transfer for each memory object
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            lmc_ops.multi_layer_kv_transfer(
+                memory_obj.tensor,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                kvcaches[0].device,
+                self.page_buffer_size,
+                False,
+                self.use_mla,
+            )
+
     def get_shape(self, num_tokens: int) -> torch.Size:
         kv_size = 1 if self.use_mla else 2
         return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
@@ -554,6 +639,14 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         """ """
 
         raise NotImplementedError
+
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        """
+        Batched store the data from memory objects into GPU memory.
+        For VLLMBufferLayerwiseGPUConnector, this is not implemented as
+        it uses a different approach with batched_to_gpu generator.
+        """
+        raise NotImplementedError("Use batched_to_gpu generator instead")
 
     def get_kv(self, layer_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -901,6 +994,14 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
         """ """
 
         raise NotImplementedError
+
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        """
+        Batched store the data from memory objects into GPU memory.
+        For VLLMPagedMemLayerwiseGPUConnector, this is not implemented as
+        it uses a different approach with batched_to_gpu generator.
+        """
+        raise NotImplementedError("Use batched_to_gpu generator instead")
 
     @_lmcache_nvtx_annotate
     def batched_to_gpu(self, starts: List[int], ends: List[int], **kwargs):
