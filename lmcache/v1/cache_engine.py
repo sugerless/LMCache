@@ -570,35 +570,50 @@ class LMCacheEngine:
 
         # secondary lookup on p2p (via lookup_server) if enabled
         search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
-        for start, end, key in self.token_database.process_tokens(tokens):
-            assert isinstance(key, CacheEngineKey)
-
-            if self.use_layerwise:
-                # TODO(Jiayi): Optimize by checking only the existence of the key
-                # of one layer
-                key_all_layers = key.split_layers(self.num_layers)
-                for key_single_layer in key_all_layers:
-                    if not self.storage_manager.contains(
-                        key_single_layer, search_range, pin
-                    ):
-                        if search_p2p and self.lookup_server.lookup(key_single_layer):
-                            continue
-                        return old_end
+        # blankdebug hack
+        token_ranges = list(self.token_database.process_tokens(tokens))
+        keys = [key for _, _, key in token_ranges]
+        range_infos = token_ranges
+        hits = self.storage_manager.batched_contains(keys, ["RemoteBackend"], pin)
+        logger.info(f'blankdebug lookup hits: {hits}, keys: {keys}')
+        assert len(hits) == len(keys)
+        for i, (start, end, key) in enumerate(range_infos):
+            if hits[i] == 1:
                 old_end = end
-            else:
-                if self.storage_manager.contains(key, search_range, pin):
-                    old_end = end
-                    continue
-
-                if search_p2p:
-                    assert self.lookup_server is not None
-                    if self.lookup_server.lookup(key):
-                        old_end = end
-                        continue
-                return old_end
-
-        # all tokens where found, return the maximal end
+                continue
+            return old_end
         return end
+
+        # search_p2p = self.enable_p2p and (search_range is None or "p2p" in search_range)
+        # for start, end, key in self.token_database.process_tokens(tokens):
+        #     assert isinstance(key, CacheEngineKey)
+
+        #     if self.use_layerwise:
+        #         # TODO(Jiayi): Optimize by checking only the existence of the key
+        #         # of one layer
+        #         key_all_layers = key.split_layers(self.num_layers)
+        #         for key_single_layer in key_all_layers:
+        #             if not self.storage_manager.contains(
+        #                 key_single_layer, search_range, pin
+        #             ):
+        #                 if search_p2p and self.lookup_server.lookup(key_single_layer):
+        #                     continue
+        #                 return old_end
+        #         old_end = end
+        #     else:
+        #         if self.storage_manager.contains(key, search_range, pin):
+        #             old_end = end
+        #             continue
+
+        #         if search_p2p:
+        #             assert self.lookup_server is not None
+        #             if self.lookup_server.lookup(key):
+        #                 old_end = end
+        #                 continue
+        #         return old_end
+
+        # # all tokens where found, return the maximal end
+        # return end
 
     @_lmcache_nvtx_annotate
     def clear(

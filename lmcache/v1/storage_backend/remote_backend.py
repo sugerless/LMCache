@@ -159,6 +159,34 @@ class RemoteBackend(StorageBackendInterface):
             logger.warning(f"Remote connection failed in contains: {e}")
             logger.warning("Returning False")
             return False
+    
+    @_init_connection_wrapper
+    def batched_contains(self, keys: List[CacheEngineKey], pin: bool = False) -> List[bool]:
+        res = [False] * len(keys)
+        if self.connection is None:
+            logger.error("Connection is None in contains, returning False")
+            return res
+
+        # For MLA worker id as 0 mode, use worker_id 0
+        if self._mla_worker_id_as0_mode:
+            keys = [CacheEngineKey(
+                    key.fmt, key.model_name, key.world_size, 0, key.chunk_hash
+                ) for key in keys]
+
+        # future = asyncio.run_coroutine_threadsafe(
+        #     self.connection.batched_exists(keys), self.loop
+        # )
+        # try:
+        #     res = future.result()
+        #     return res
+        # except Exception as e:
+        #     logger.error(f"Remote connection failed in batched_contains: {e}")
+        #     with self.lock:
+        #         self.connection = None
+        #         self.failure_time = time.time()
+        #     return res
+        return self.connection.batched_exists_sync(keys)
+
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.lock:

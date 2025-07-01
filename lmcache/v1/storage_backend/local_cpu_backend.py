@@ -86,6 +86,17 @@ class LocalCPUBackend(StorageBackendInterface):
             if pin:
                 self.hot_cache[key].pin()
             return True
+    
+    def batched_contains(self, keys: List[CacheEngineKey], pin: bool = False) -> List[bool]:
+        res = [False] * len(keys)
+        # with self.cpu_lock:
+        #     for key in keys:
+        #         if key not in self.hot_cache:
+        #             res.append(False)
+        #         if pin:
+        #             self.hot_cache[key].pin()
+        #         res.append(True)
+        return res
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """

@@ -59,7 +59,22 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         :return: True if the key exists, False otherwise.
         """
         raise NotImplementedError
+    
+    @abc.abstractmethod
+    def batched_contains(self, keys: List[CacheEngineKey], pin: bool = False) -> List[bool]:
+        """
+        Check whether key is in the storage backend.
 
+        :param CacheEngineKey key: The key of the MemoryObj.
+
+        :param bool pin: Whether to pin the key.
+            If True, the corresponding KV cache will be
+            pinned in the storage backend.
+
+        :return: True if the key exists, False otherwise.
+        """
+        raise NotImplementedError
+    
     @abc.abstractmethod
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """

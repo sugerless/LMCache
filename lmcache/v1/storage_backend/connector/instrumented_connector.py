@@ -76,6 +76,12 @@ class InstrumentedRemoteConnector(RemoteConnector):
 
     async def close(self) -> None:
         await self._connector.close()
+    
+    async def batched_exists(self, keys: List[CacheEngineKey]) -> List[bool]:
+        return await self._connector.batched_exists(keys)
+    
+    def batched_exists_sync(self, keys: List[CacheEngineKey]) -> List[bool]:
+        return self._connector.batched_exists_sync(keys)
 
     def getWrappedConnector(self) -> RemoteConnector:
         return self._connector

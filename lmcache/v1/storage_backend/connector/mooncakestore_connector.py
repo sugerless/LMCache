@@ -156,6 +156,12 @@ class MooncakestoreConnector(RemoteConnector):
     async def exists(self, key: CacheEngineKey) -> bool:
         return self.store.is_exist(key.to_string())
 
+    async def batched_exists(self, keys: List[CacheEngineKey]) -> List[bool]:
+        return self.store.batch_is_exist([key.to_string() for key in keys])
+    
+    def batched_exists_sync(self, keys: List[CacheEngineKey]) -> List[bool]:
+        return self.store.batch_is_exist([key.to_string() for key in keys])
+
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
 
