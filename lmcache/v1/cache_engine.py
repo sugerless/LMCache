@@ -300,6 +300,13 @@ class LMCacheEngine:
             self.stats_monitor.on_retrieve_finished(monitor_req_id, 0)
             return ret_mask
 
+        # lookup
+        hits = self.storage_manager.batch_contains(keys_to_retrieve)
+        assert len(hits) == len(keys_to_retrieve)
+        keys_to_retrieve = [
+            key for key, hit in zip(keys_to_retrieve, hits) if hit == 1
+        ]
+        
         # Batch retrieve all memory objects
         batch_get_start_time = time.perf_counter()
         memory_objs = self.storage_manager.batched_get(keys_to_retrieve)
