@@ -25,7 +25,7 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/c
 # Install PyTorch using Python 3.10 from manylinux
 RUN /opt/python/cp310-cp310/bin/python -m ensurepip && \
     /opt/python/cp310-cp310/bin/pip install --upgrade pip && \
-    /opt/python/cp310-cp310/bin/pip install torch==2.6.0+cu124 \
+    /opt/python/cp310-cp310/bin/pip install torch==2.7.0+cu124 \
     --index-url https://download.pytorch.org/whl/cu124
 
 # Stage 2: Final minimal image for cibuildwheel

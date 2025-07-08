@@ -24,6 +24,7 @@ from typing import (
 )
 import asyncio
 import threading
+import time
 
 # Third Party
 import torch
@@ -41,6 +42,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.mooncakestore_connector import MooncakestoreConnector
+from lmcache.observability import LMCStatsMonitor
 
 if TYPE_CHECKING:
     # First Party
@@ -95,6 +97,9 @@ class StorageManager:
         self.worker_id = metadata.worker_id
 
         self.stream = torch.cuda.Stream()
+
+        self._stats_monitor = LMCStatsMonitor.GetOrCreate()
+
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -173,14 +178,33 @@ class StorageManager:
         # backend if this backend does not have this cache.
         # There's no way to configure a global caching policy
         # among different storage backends.
+        begin = time.perf_counter()
         if self.store:
             future = asyncio.run_coroutine_threadsafe(
                 self.store.batch_put(keys, memory_objs), self.loop
             )
-            future.result()  # Wait for completion
+            lambda_callback = lambda f: self.batched_put_callback(f, memory_objs)
+            future.add_done_callback(lambda_callback)
+        
+        total_bytes = sum(m.get_size() for m in memory_objs)
 
-        for memory_obj in memory_objs:
-            memory_obj.ref_count_down()
+        end = time.perf_counter()
+        self._stats_monitor.update_interval_remote_time_to_put((end - begin) * 1000)
+        self._stats_monitor.update_interval_remote_write_metrics(total_bytes)
+
+    def batched_put_callback(self, future: Future, memory_objs: List[MemoryObj]):
+        """
+        Callback function for put tasks.
+        """
+        try:
+            exc = future.exception()
+            if exc is not None:
+                logger.warning(f"batched_put failed with exception: {exc}")
+        except Exception as e:
+            logger.error(f"Error checking future result: {e}")
+        finally:
+            for memory_obj in memory_objs:
+                memory_obj.ref_count_down()
 
     def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
@@ -206,9 +230,15 @@ class StorageManager:
         :param List[CacheEngineKey] keys: The keys to retrieve.
         :return: List of MemoryObj or None for each key.
         """
+        memory_objs = [None] * len(keys)
+        begin = time.perf_counter()
         if self.store:
-            return self.store.batch_get(keys)
-        return [None] * len(keys)
+            memory_objs =  self.store.batch_get(keys)
+        tot_obj_size = sum(memory_obj.get_size() for memory_obj in memory_objs)
+        end = time.perf_counter()
+        self._stats_monitor.update_interval_remote_time_to_get((end - begin) * 1000)
+        self._stats_monitor.update_interval_remote_read_metrics(tot_obj_size)
+        return memory_objs
 
     def layerwise_batched_get(
         self,

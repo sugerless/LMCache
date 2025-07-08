@@ -301,6 +301,9 @@ class LMCacheEngine:
             return ret_mask
 
         # lookup
+        get_time = 0.0
+        trans_to_gpu_time = 0.0
+        t = time.perf_counter()
         hits = self.storage_manager.batch_contains(keys_to_retrieve)
         assert len(hits) == len(keys_to_retrieve)
         keys_to_retrieve = [
@@ -308,11 +311,10 @@ class LMCacheEngine:
         ]
         
         # Batch retrieve all memory objects
-        batch_get_start_time = time.perf_counter()
         memory_objs = self.storage_manager.batched_get(keys_to_retrieve)
-        batch_get_end_time = time.perf_counter()
+        get_time = time.perf_counter() - t
 
-        gpu_transfer_start_time = time.perf_counter()
+        t = time.perf_counter()
 
         # Collect valid memory objects and their corresponding info for batch processing
         valid_memory_objs = []
@@ -339,6 +341,7 @@ class LMCacheEngine:
                     valid_memory_objs, valid_starts, valid_ends, **kwargs
                 )
             except (NotImplementedError, AttributeError):
+                logger.error(f'blankdebug retrieve Fall back to individual transfers if batched is not implemented')
                 # Fall back to individual transfers if batched is not implemented
                 for memory_obj, start, end in zip(
                     valid_memory_objs, valid_starts, valid_ends, strict=False
@@ -349,14 +352,24 @@ class LMCacheEngine:
             for memory_obj in valid_memory_objs:
                 memory_obj.ref_count_down()
 
-        gpu_transfer_end_time = time.perf_counter()
+        trans_to_gpu_time = time.perf_counter() - t
+        tot_time = get_time + trans_to_gpu_time
+
+        tot_kv_size = sum(memory_obj.get_size() for memory_obj in memory_objs)
+
+        retrieved_tokens = torch.sum(ret_mask)
         # print cost ms level
         logger.info(
-            "Batch get %d KV cache takes: %.4f ms; GPU transfer takes: %.4f ms",
-            len(keys_to_retrieve),
-            (batch_get_end_time - batch_get_start_time) * 1000,
-            (gpu_transfer_end_time - gpu_transfer_start_time) * 1000,
+            "Retrieve %d tokens takes: %.4f ms; throughput: %.4f GB/s; "
+            "GPU transfer takes: %.4f ms, get_time: %.4f ms",
+            retrieved_tokens,
+            tot_time * 1000,
+            tot_kv_size / tot_time / 1024**3,
+            trans_to_gpu_time * 1000,
+            get_time * 1000,
         )
+        self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
+
         return ret_mask
 
     @_lmcache_nvtx_annotate
